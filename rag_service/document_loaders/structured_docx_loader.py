@@ -5,7 +5,11 @@ from typing import Any, Dict, Iterable, List, Optional
 
 from pydantic import BaseModel, Field
 
-from rag_service.document_loaders.parsed_blocks import BLOCK_TYPE_TEXT, ParsedBlock
+from rag_service.document_loaders.parsed_blocks import (
+    BLOCK_TYPE_TEXT,
+    SPLIT_POLICY_MARKDOWN_HEADINGS,
+    ParsedBlock,
+)
 from rag_service.document_loaders.structured_loader import StructuredDocumentLoader
 from rag_service.document_loaders.table.models import TableBlock
 from rag_service.document_loaders.table.docx_parser import DocxTableParser
@@ -29,7 +33,9 @@ class StructuredDocxLoader(StructuredDocumentLoader):
 
     def parse_document(self, document: Any) -> List[ParsedBlock]:
         elements = self._document_to_markdown_elements(document)
-        return self._split_markdown_elements(elements)
+        if not elements:
+            return []
+        return [self._document_to_block(elements)]
 
     def _document_to_markdown_elements(self, document: Any) -> List[DocxMarkdownElement]:
         elements = []
@@ -133,51 +139,22 @@ class StructuredDocxLoader(StructuredDocumentLoader):
             "loader": "structured_docx",
         }
 
-    def _split_markdown_elements(self, elements: List[DocxMarkdownElement]) -> List[ParsedBlock]:
-        split_level = self._minimum_heading_level(elements)
-        sections = self._collect_sections(elements, split_level)
-        return [self._section_to_block(section, index) for index, section in enumerate(sections)]
+    def _document_to_block(self, elements: List[DocxMarkdownElement]) -> ParsedBlock:
+        text = "\n\n".join(element.text for element in elements if element.text).strip()
+        metadata = self._document_metadata(elements)
+        return ParsedBlock(
+            text=text,
+            metadata=metadata,
+            block_type=BLOCK_TYPE_TEXT,
+            split_policy=SPLIT_POLICY_MARKDOWN_HEADINGS,
+        )
 
-    @staticmethod
-    def _minimum_heading_level(elements: List[DocxMarkdownElement]) -> Optional[int]:
-        levels = [element.heading_level for element in elements if element.heading_level is not None]
-        return max(levels) if levels else None
-
-    def _collect_sections(self, elements: List[DocxMarkdownElement], split_level: Optional[int]):
-        sections = []
-        current = []
-        for element in elements:
-            if self._starts_new_section(element, split_level, current):
-                sections.append(current)
-                current = []
-            current.append(element)
-        if current:
-            sections.append(current)
-        return sections
-
-    @staticmethod
-    def _starts_new_section(element, split_level, current):
-        return bool(current and split_level and element.heading_level == split_level)
-
-    def _section_to_block(self, section: List[DocxMarkdownElement], index: int) -> ParsedBlock:
-        text = "\n\n".join(element.text for element in section if element.text).strip()
-        metadata = self._section_metadata(section, index)
-        return ParsedBlock(text=text, metadata=metadata, block_type=BLOCK_TYPE_TEXT)
-
-    def _section_metadata(self, section: List[DocxMarkdownElement], index: int) -> Dict[str, Any]:
-        headers = self._section_headers(section)
-        metadata = self._base_metadata(headers, index)
-        tables = [copy.deepcopy(element.table_metadata) for element in section if element.table_metadata]
+    def _document_metadata(self, elements: List[DocxMarkdownElement]) -> Dict[str, Any]:
+        metadata = self._base_metadata([], 0)
+        tables = [copy.deepcopy(element.table_metadata) for element in elements if element.table_metadata]
         if tables:
             metadata["tables"] = tables
         return metadata
-
-    @staticmethod
-    def _section_headers(section: List[DocxMarkdownElement]) -> List[str]:
-        for element in reversed(section):
-            if element.headers:
-                return list(element.headers)
-        return []
 
     @staticmethod
     def _table_to_markdown(table_block: TableBlock) -> str:
