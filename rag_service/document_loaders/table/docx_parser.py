@@ -15,11 +15,21 @@ class DocxCellSpan(BaseModel):
     rowspan: int = 1
     colspan: int = 1
 
+    def to_metadata(self) -> Dict[str, Any]:
+        return {
+            "text": self.text,
+            "row": self.row,
+            "col": self.col,
+            "rowspan": self.rowspan,
+            "colspan": self.colspan,
+        }
+
 
 class DocxTableParser:
     def parse(self, table: Any, metadata: Optional[Dict[str, Any]] = None) -> TableBlock:
         cell_spans = self._collect_spans(table)
-        headers, rows = self._to_table_values(cell_spans)
+        expanded_rows = self._to_grid(cell_spans)
+        headers, rows = self._to_table_values(expanded_rows)
         block_metadata = dict(metadata or {})
         return TableBlock(
             title=block_metadata.get("title", ""),
@@ -28,6 +38,8 @@ class DocxTableParser:
             rows=rows,
             metadata=block_metadata,
             display_html=self._to_html(cell_spans),
+            cell_spans=[span.to_metadata() for span in cell_spans],
+            expanded_rows=expanded_rows,
         )
 
     def _collect_spans(self, table: Any) -> List[DocxCellSpan]:
@@ -53,7 +65,7 @@ class DocxTableParser:
         spans = []
         active_merges = {}
         for row_index, tr in enumerate(tr_list):
-            col_index = 0
+            col_index = self._append_omitted_cells(spans, tr, row_index, 0, "gridBefore")
             for tc in getattr(tr, "tc_lst", []):
                 colspan = self._ooxml_colspan(tc)
                 vmerge = self._ooxml_vmerge(tc)
@@ -64,7 +76,14 @@ class DocxTableParser:
                     spans.append(span)
                     self._update_active_merges(active_merges, span, vmerge)
                 col_index += colspan
+            self._append_omitted_cells(spans, tr, row_index, col_index, "gridAfter")
         return spans
+
+    def _append_omitted_cells(self, spans, tr, row_index, col_index, attr_name) -> int:
+        omitted_count = self._ooxml_omitted_grid_count(tr, attr_name)
+        for offset in range(omitted_count):
+            spans.append(DocxCellSpan(text="", row=row_index, col=col_index + offset))
+        return col_index + omitted_count
 
     def _span_from_cell(self, cell: Any, row_index: int, col_index: int) -> DocxCellSpan:
         return DocxCellSpan(
@@ -125,6 +144,11 @@ class DocxTableParser:
             return str(getattr(tc, "text", "") or "").strip()
 
     @staticmethod
+    def _ooxml_omitted_grid_count(tr: Any, attr_name: str) -> int:
+        value = getattr(getattr(getattr(tr, "trPr", None), attr_name, None), "val", None)
+        return int(value) if value else 0
+
+    @staticmethod
     def _extend_rowspan(active_merges: Dict[int, DocxCellSpan], col_index: int, colspan: int):
         extended_ids = set()
         for offset in range(colspan):
@@ -141,11 +165,11 @@ class DocxTableParser:
             else:
                 active_merges.pop(col_index, None)
 
-    def _to_table_values(self, spans: List[DocxCellSpan]) -> Tuple[List[str], List[List[str]]]:
-        grid = self._to_grid(spans)
-        if not grid:
+    @staticmethod
+    def _to_table_values(expanded_rows: List[List[str]]) -> Tuple[List[str], List[List[str]]]:
+        if not expanded_rows:
             return [], []
-        return grid[0], grid[1:]
+        return expanded_rows[0], expanded_rows[1:]
 
     @staticmethod
     def _to_grid(spans: List[DocxCellSpan]) -> List[List[str]]:
