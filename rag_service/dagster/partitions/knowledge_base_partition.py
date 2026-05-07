@@ -1,0 +1,3 @@
+from dagster import DynamicPartitionsDefinition
+
+knowledge_base_partitions_def = DynamicPartitionsDefinition(name="knowledge_base")
