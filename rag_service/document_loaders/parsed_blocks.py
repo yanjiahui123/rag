@@ -114,6 +114,7 @@ def _split_block_text(block: ParsedBlock, text_splitter: Optional[Any]) -> List[
 
 def _split_markdown_text(text: str, text_splitter: Optional[Any]) -> List[str]:
     sections = _split_markdown_by_deepest_heading(text)
+    sections = _merge_markdown_sections(sections, _splitter_chunk_size(text_splitter))
     if text_splitter is None:
         return sections
     splits = []
@@ -148,3 +149,33 @@ def _deepest_heading_level(lines: List[str]) -> Optional[int]:
 def _markdown_heading_level(line: str) -> Optional[int]:
     match = re.match(r"^(#{1,6})\s+\S", line.strip())
     return len(match.group(1)) if match else None
+
+
+def _splitter_chunk_size(text_splitter: Optional[Any]) -> Optional[int]:
+    if text_splitter is None:
+        return None
+    for attr_name in ("chunk_size", "_chunk_size"):
+        value = getattr(text_splitter, attr_name, None)
+        if isinstance(value, int) and value > 0:
+            return value
+    return None
+
+
+def _merge_markdown_sections(sections: List[str], chunk_size: Optional[int]) -> List[str]:
+    if not chunk_size:
+        return sections
+    merged_sections = []
+    current = ""
+    for section in sections:
+        if not current:
+            current = section
+            continue
+        candidate = current + "\n\n" + section
+        if len(candidate) <= chunk_size:
+            current = candidate
+        else:
+            merged_sections.append(current)
+            current = section
+    if current:
+        merged_sections.append(current)
+    return merged_sections
