@@ -38,6 +38,7 @@ from rag_service.document_loaders.markdown_to_html_section_and_length_loader imp
 from rag_service.document_loaders.parsed_blocks import ParsedBlock, blocks_to_documents, documents_to_parsed_blocks
 from rag_service.document_loaders.ppt_helper_loader import PowerPointHelperLoader
 from rag_service.document_loaders.qa_loader import XlsxForQaLoader
+from rag_service.document_loaders.structured_docx_loader import StructuredDocxLoader
 from rag_service.document_loaders.txt_loader import TextLoader
 from rag_service.logger import Module, get_logger
 from rag_service.models.enums import (
@@ -93,6 +94,18 @@ class BaseLoader(ABC):
         except Exception as e:
             if self.degrade_loader:
                 return self.degrade_loader.load()
+            raise e
+
+    def parse_blocks(self) -> List[ParsedBlock]:
+        try:
+            if hasattr(self.loader, "parse_blocks"):
+                return self.loader.parse_blocks()
+            return documents_to_parsed_blocks(self.load())
+        except Exception as e:
+            if self.degrade_loader:
+                if hasattr(self.degrade_loader, "parse_blocks"):
+                    return self.degrade_loader.parse_blocks()
+                return documents_to_parsed_blocks(self.degrade_loader.load())
             raise e
 
 
@@ -264,6 +277,23 @@ class DocxByHeadAndLengthLoader(
         self.degrade_loader = Docx2txtLoader(file_path)
 
 
+class StructuredDocxByBlockLoader(
+    BaseLoader,
+    loader_name="结构化DOCX加载器",
+    description="DOCX结构化解析加载器，先输出ParsedBlock，再交由统一切片阶段处理",
+    processable_types=[FileExtension.DOCX],
+):
+    def __init__(self, file_path: str):
+        self.loader = StructuredDocxLoader(file_path)
+        self.degrade_loader = Docx2txtLoader(file_path)
+
+    def load(self) -> List[Document]:
+        return blocks_to_documents(self.parse_blocks(), Document, None)
+
+    def load_and_split(self, text_splitter: Optional[TextSplitter] = None) -> List[Document]:
+        return blocks_to_documents(self.parse_blocks(), Document, text_splitter)
+
+
 class PptHelperLoader(
     BaseLoader,
     loader_name="PPT助手加载器",
@@ -288,7 +318,7 @@ _TYPE_TO_DEFAULT_LOADER: Dict[str, Type[BaseLoader]] = {
     FileExtension.PDF.value: PdfLoader,
     FileExtension.XLSX.value: XlsxMarkdownLoader,
     FileExtension.XLS.value: XlsMarkdownLoader,
-    FileExtension.DOCX.value: DocxByHeadAndLengthLoader,
+    FileExtension.DOCX.value: StructuredDocxByBlockLoader,
     FileExtension.DOC.value: DocxByHeadAndLengthLoader,
     FileExtension.PPTX.value: PptLoader,
     FileExtension.PPT.value: PptLoader,
@@ -409,8 +439,7 @@ def parse_file(
 ) -> List[ParsedBlock]:
     try:
         loader = get_loader(original_document.uri, vectorization_config, original_document.source, asset_type)
-        docs = loader.load()
-        return documents_to_parsed_blocks(docs)
+        return loader.parse_blocks()
     except Exception as e:
         _handle_load_exception(original_document, e)
     return []
