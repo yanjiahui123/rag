@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import List, Optional
 
-from rag_service.document_loaders.parsed_blocks import ParsedBlock
+from rag_service.document_loaders.parsed_blocks import ParsedBlock, ParsedDocument
 
 
 class StructuredDocumentLoader:
@@ -12,3 +12,6 @@ class StructuredDocumentLoader:
 
     def parse_blocks(self) -> List[ParsedBlock]:
         raise NotImplementedError
+
+    def parse_to_document(self) -> ParsedDocument:
+        return ParsedDocument(blocks=self.parse_blocks())

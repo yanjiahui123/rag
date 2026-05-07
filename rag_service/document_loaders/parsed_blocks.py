@@ -44,6 +44,24 @@ class ParsedBlock(BaseModel):
         object.__setattr__(self, "metadata", metadata)
 
 
+class ParsedDocument(BaseModel):
+    text: str = ""
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+    blocks: List[ParsedBlock] = Field(default_factory=list)
+    split_policy: str = SPLIT_POLICY_TEXT
+
+    def to_blocks(self) -> List[ParsedBlock]:
+        if self.text:
+            return [
+                ParsedBlock(
+                    text=self.text,
+                    metadata=copy.deepcopy(self.metadata),
+                    split_policy=self.split_policy,
+                )
+            ]
+        return [block.copy(deep=True) for block in self.blocks]
+
+
 def documents_to_parsed_blocks(documents: Iterable[Any], split_policy: str = SPLIT_POLICY_TEXT) -> List[ParsedBlock]:
     blocks = []
     for document in documents:
@@ -62,6 +80,10 @@ def documents_to_parsed_blocks(documents: Iterable[Any], split_policy: str = SPL
             )
         )
     return blocks
+
+
+def blocks_to_parsed_document(blocks: Iterable[ParsedBlock], metadata: Optional[Dict[str, Any]] = None):
+    return ParsedDocument(blocks=[block.copy(deep=True) for block in blocks], metadata=copy.deepcopy(metadata or {}))
 
 
 def blocks_to_documents(

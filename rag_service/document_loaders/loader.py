@@ -35,7 +35,13 @@ from rag_service.document_loaders.html_section_loader import HTMLLoaderByHead
 from rag_service.document_loaders.html_to_docx_section_loader import HTMLToDocxLoaderByHead
 from rag_service.document_loaders.mardown_to_html_section_loader import MarkdownToHTMLLoaderByHead
 from rag_service.document_loaders.markdown_to_html_section_and_length_loader import MarkdownToHTMLLoaderByHeadAndLength
-from rag_service.document_loaders.parsed_blocks import ParsedBlock, blocks_to_documents, documents_to_parsed_blocks
+from rag_service.document_loaders.parsed_blocks import (
+    ParsedBlock,
+    ParsedDocument,
+    blocks_to_documents,
+    blocks_to_parsed_document,
+    documents_to_parsed_blocks,
+)
 from rag_service.document_loaders.ppt_helper_loader import PowerPointHelperLoader
 from rag_service.document_loaders.qa_loader import XlsxForQaLoader
 from rag_service.document_loaders.structured_docx_loader import StructuredDocxLoader
@@ -107,6 +113,23 @@ class BaseLoader(ABC):
                     return self.degrade_loader.parse_blocks()
                 return documents_to_parsed_blocks(self.degrade_loader.load())
             raise e
+
+    def parse_to_document(self) -> ParsedDocument:
+        try:
+            if hasattr(self.loader, "parse_to_document"):
+                return self.loader.parse_to_document()
+            return blocks_to_parsed_document(self.parse_blocks())
+        except Exception as e:
+            if self.degrade_loader:
+                return self._degrade_parse_to_document()
+            raise e
+
+    def _degrade_parse_to_document(self) -> ParsedDocument:
+        if hasattr(self.degrade_loader, "parse_to_document"):
+            return self.degrade_loader.parse_to_document()
+        if hasattr(self.degrade_loader, "parse_blocks"):
+            return blocks_to_parsed_document(self.degrade_loader.parse_blocks())
+        return blocks_to_parsed_document(documents_to_parsed_blocks(self.degrade_loader.load()))
 
 
 class PdfLoader(
@@ -280,7 +303,7 @@ class DocxByHeadAndLengthLoader(
 class StructuredDocxByBlockLoader(
     BaseLoader,
     loader_name="结构化DOCX加载器",
-    description="DOCX结构化解析加载器，先输出ParsedBlock，再交由统一切片阶段处理",
+    description="DOCX结构化解析加载器，先输出ParsedDocument，再交由统一切片阶段处理",
     processable_types=[FileExtension.DOCX],
 ):
     def __init__(self, file_path: str):
@@ -436,24 +459,24 @@ def parse_file(
     original_document: OriginalDocument,
     vectorization_config: VectorizationConfig,
     asset_type: AssetType,
-) -> List[ParsedBlock]:
+) -> ParsedDocument:
     try:
         loader = get_loader(original_document.uri, vectorization_config, original_document.source, asset_type)
-        return loader.parse_blocks()
+        return loader.parse_to_document()
     except Exception as e:
         _handle_load_exception(original_document, e)
-    return []
+    return ParsedDocument()
 
 
 def split_parsed_file(
-    parsed_blocks: List[ParsedBlock],
+    parsed_document: ParsedDocument,
     original_document: OriginalDocument,
     vectorization_config: VectorizationConfig,
     asset_type: AssetType,
 ) -> List[Document]:
     try:
         splitter = get_splitter(original_document.uri, vectorization_config)
-        docs = blocks_to_documents(parsed_blocks, Document, splitter)
+        docs = blocks_to_documents(parsed_document.to_blocks(), Document, splitter)
         processed_docs = []
         for doc in docs:
             normalized_doc = normalize_loaded_document(doc, original_document, asset_type)
@@ -470,7 +493,7 @@ def load_file(
     vectorization_config: VectorizationConfig,
     asset_type: AssetType,
 ) -> List[Document]:
-    parsed_blocks = parse_file(original_document, vectorization_config, asset_type)
-    if not parsed_blocks:
+    parsed_document = parse_file(original_document, vectorization_config, asset_type)
+    if not parsed_document.text and not parsed_document.blocks:
         return []
-    return split_parsed_file(parsed_blocks, original_document, vectorization_config, asset_type)
+    return split_parsed_file(parsed_document, original_document, vectorization_config, asset_type)

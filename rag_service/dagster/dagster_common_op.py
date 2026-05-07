@@ -35,7 +35,12 @@ from rag_service.corpus_detections.similar_doument_detector import SimilarDocume
 from rag_service.corpus_detections.url_validation_detector import UrlValidityDetector
 from rag_service.database import engine
 from rag_service.document_loaders.loader import load_file, parse_file, split_parsed_file
-from rag_service.document_loaders.parsed_blocks import ParsedBlock, SPLIT_POLICY_NO_SPLIT, documents_to_parsed_blocks
+from rag_service.document_loaders.parsed_blocks import (
+    ParsedDocument,
+    SPLIT_POLICY_NO_SPLIT,
+    blocks_to_parsed_document,
+    documents_to_parsed_blocks,
+)
 from rag_service.logger import Module, get_logger
 from rag_service.models.database.models import AutoJobInstances, UpdatedOriginalDocument, VectorStore
 from rag_service.models.database.models import OriginalDocument as OriginalDocumentEntity
@@ -301,7 +306,7 @@ def save_added_document_sources(
 @op(retry_policy=RetryPolicy(max_retries=3), tags={"dagster/priority": 1})
 def parse_original_documents(
     context: OpExecutionContext, original_documents: List[OriginalDocument]
-) -> List[Tuple[OriginalDocument, List[ParsedBlock]]]:
+) -> List[Tuple[OriginalDocument, ParsedDocument]]:
     knowledge_base_serial_number, knowledge_base_asset_name = parse_asset_partition_key(context.partition_key)
     with Session(engine) as session:
         knowledge_base_asset = get_knowledge_base_asset(
@@ -314,28 +319,29 @@ def parse_original_documents(
     if asset_type in AssetType.types_skip_loader_and_split():
         for original_document in original_documents:
             chunks = get_text_slices(Path(original_document.uri))
+            parsed_blocks = documents_to_parsed_blocks(chunks, split_policy=SPLIT_POLICY_NO_SPLIT)
             parsed_documents.append((
                 original_document,
-                documents_to_parsed_blocks(chunks, split_policy=SPLIT_POLICY_NO_SPLIT),
+                blocks_to_parsed_document(parsed_blocks),
             ))
         return parsed_documents
 
     for original_document in original_documents:
-        parsed_blocks = parse_file(original_document, vectorization_config, asset_type)
-        parsed_documents.append((original_document, parsed_blocks))
+        parsed_document = parse_file(original_document, vectorization_config, asset_type)
+        parsed_documents.append((original_document, parsed_document))
     return parsed_documents
 
 
 @op(retry_policy=RetryPolicy(max_retries=1), tags={"dagster/priority": 1})
 def save_parsed_documents(
-    context: OpExecutionContext, parsed_documents: List[Tuple[OriginalDocument, List[ParsedBlock]]]
-) -> List[Tuple[OriginalDocument, List[ParsedBlock]]]:
+    context: OpExecutionContext, parsed_documents: List[Tuple[OriginalDocument, ParsedDocument]]
+) -> List[Tuple[OriginalDocument, ParsedDocument]]:
     return parsed_documents
 
 
 @op(retry_policy=RetryPolicy(max_retries=3), tags={"dagster/priority": 1})
 def split_parsed_documents(
-    context: OpExecutionContext, parsed_documents: List[Tuple[OriginalDocument, List[ParsedBlock]]]
+    context: OpExecutionContext, parsed_documents: List[Tuple[OriginalDocument, ParsedDocument]]
 ) -> List[Tuple[OriginalDocument, List[Document]]]:
     knowledge_base_serial_number, knowledge_base_asset_name = parse_asset_partition_key(context.partition_key)
     with Session(engine) as session:
@@ -347,8 +353,8 @@ def split_parsed_documents(
         vectorization_config = VectorizationConfig(**knowledge_base_asset.vectorization_config)
 
     document_chunks = []
-    for original_document, parsed_blocks in parsed_documents:
-        chunks = split_parsed_file(parsed_blocks, original_document, vectorization_config, asset_type)
+    for original_document, parsed_document in parsed_documents:
+        chunks = split_parsed_file(parsed_document, original_document, vectorization_config, asset_type)
         document_chunks.append((original_document, chunks))
 
     if kb_allow_synchronous_update and document_chunks:

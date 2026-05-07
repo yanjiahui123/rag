@@ -9,6 +9,7 @@ from rag_service.document_loaders.parsed_blocks import (
     BLOCK_TYPE_TEXT,
     SPLIT_POLICY_MARKDOWN_HEADINGS,
     ParsedBlock,
+    ParsedDocument,
 )
 from rag_service.document_loaders.structured_loader import StructuredDocumentLoader
 from rag_service.document_loaders.table.models import TableBlock
@@ -29,13 +30,16 @@ class StructuredDocxLoader(StructuredDocumentLoader):
         self.table_parser = table_parser or DocxTableParser()
 
     def parse_blocks(self) -> List[ParsedBlock]:
+        return self.parse_to_document().to_blocks()
+
+    def parse_to_document(self) -> ParsedDocument:
         return self.parse_document(self._open_document())
 
-    def parse_document(self, document: Any) -> List[ParsedBlock]:
+    def parse_document(self, document: Any) -> ParsedDocument:
         elements = self._document_to_markdown_elements(document)
         if not elements:
-            return []
-        return [self._document_to_block(elements)]
+            return ParsedDocument(metadata=self._base_metadata([], 0))
+        return self._document_from_elements(elements)
 
     def _document_to_markdown_elements(self, document: Any) -> List[DocxMarkdownElement]:
         elements = []
@@ -139,13 +143,12 @@ class StructuredDocxLoader(StructuredDocumentLoader):
             "loader": "structured_docx",
         }
 
-    def _document_to_block(self, elements: List[DocxMarkdownElement]) -> ParsedBlock:
+    def _document_from_elements(self, elements: List[DocxMarkdownElement]) -> ParsedDocument:
         text = "\n\n".join(element.text for element in elements if element.text).strip()
         metadata = self._document_metadata(elements)
-        return ParsedBlock(
+        return ParsedDocument(
             text=text,
             metadata=metadata,
-            block_type=BLOCK_TYPE_TEXT,
             split_policy=SPLIT_POLICY_MARKDOWN_HEADINGS,
         )
 
