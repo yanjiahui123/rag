@@ -14,9 +14,11 @@ from rag_service.dagster.dagster_common_op import (
     document_semantic_integrity_detect,
     document_structure_detect,
     document_url_detect,
-    load_original_documents,
+    parse_original_documents,
     punctuation_detect,
     save_delayed_detection_document_data,
+    save_parsed_documents,
+    split_parsed_documents,
     sensitive_words_detect,
 )
 from rag_service.dagster.jobs.update_knowledge_base_asset_job import update_knowledge_base_asset_job
@@ -26,6 +28,48 @@ from rag_service.models.database.models import AutoJobInstances
 from rag_service.models.enums import JobStatus, VectorizationJobType
 from rag_service.utils.dagster_util import generate_asset_partition_key, get_max_op_concurrency
 from rag_service.utils.db_util import change_vectorization_job_status, get_pending_jobs_by_type
+
+
+def _build_update_op_config(job_id: str):
+    return {
+        change_vectorization_job_status_to_started.name: {"config": {"job_id": job_id}},
+        change_update_vectorization_job_status_to_success.name: {"config": {"job_id": job_id}},
+        fetch_updated_original_document_set.name: {"config": {"job_id": job_id}},
+        parse_original_documents.name: {"config": {"job_id": job_id}},
+        save_parsed_documents.name: {"config": {"job_id": job_id}},
+        split_parsed_documents.name: {"config": {"job_id": job_id}},
+        punctuation_detect.name: {"config": {"job_id": job_id}},
+        document_url_detect.name: {"config": {"job_id": job_id}},
+        document_semantic_integrity_detect.name: {"config": {"job_id": job_id}},
+        document_structure_detect.name: {"config": {"job_id": job_id}},
+        delete_database_original_documents.name: {"config": {"job_id": job_id}},
+        save_delayed_detection_document_data.name: {"config": {"job_id": job_id}},
+        sensitive_words_detect.name: {"config": {"job_id": job_id}},
+    }
+
+
+def _build_update_run_config(job_id: str):
+    return {
+        "ops": {
+            update_knowledge_base_asset.node_def.name: {
+                "ops": _build_update_op_config(job_id)
+            }
+        },
+        "execution": {
+            "config": {
+                "multiprocess": {
+                    "max_concurrent": get_max_op_concurrency(),
+                },
+            }
+        },
+    }
+
+
+def _build_update_run_request(job: AutoJobInstances):
+    return RunRequest(
+        partition_key=generate_asset_partition_key(job.knowledge_base_asset),
+        run_config=_build_update_run_config(str(job.id)),
+    )
 
 
 @sensor(job=update_knowledge_base_asset_job, default_status=DefaultSensorStatus.RUNNING)
@@ -39,42 +83,7 @@ def update_knowledge_base_asset_sensor():
             change_vectorization_job_status(session, job, JobStatus.STARTING)
 
         return SensorResult(
-            run_requests=[
-                RunRequest(
-                    partition_key=generate_asset_partition_key(job.knowledge_base_asset),
-                    run_config={
-                        "ops": {
-                            update_knowledge_base_asset.node_def.name: {
-                                "ops": {
-                                    change_vectorization_job_status_to_started.name: {
-                                        "config": {"job_id": str(job.id)}
-                                    },
-                                    change_update_vectorization_job_status_to_success.name: {
-                                        "config": {"job_id": str(job.id)}
-                                    },
-                                    fetch_updated_original_document_set.name: {"config": {"job_id": str(job.id)}},
-                                    load_original_documents.name: {"config": {"job_id": str(job.id)}},
-                                    punctuation_detect.name: {"config": {"job_id": str(job.id)}},
-                                    document_url_detect.name: {"config": {"job_id": str(job.id)}},
-                                    document_semantic_integrity_detect.name: {"config": {"job_id": str(job.id)}},
-                                    document_structure_detect.name: {"config": {"job_id": str(job.id)}},
-                                    delete_database_original_documents.name: {"config": {"job_id": str(job.id)}},
-                                    save_delayed_detection_document_data.name: {"config": {"job_id": str(job.id)}},
-                                    sensitive_words_detect.name: {"config": {"job_id": str(job.id)}},
-                                }
-                            }
-                        },
-                        "execution": {
-                            "config": {
-                                "multiprocess": {
-                                    "max_concurrent": get_max_op_concurrency(),
-                                },
-                            }
-                        },
-                    },
-                )
-                for job in pending_jobs
-            ],
+            run_requests=[_build_update_run_request(job) for job in pending_jobs],
             dynamic_partitions_requests=[
                 knowledge_base_asset_partitions_def.build_add_request([
                     generate_asset_partition_key(job.knowledge_base_asset) for job in pending_jobs
