@@ -60,6 +60,17 @@ class TableBlock(BaseModel):
             lines.append(_markdown_row([str(value) for value in row]))
         return "\n".join(lines)
 
+    def to_artifact_dict(self) -> Dict[str, Any]:
+        return {
+            "title": self.title,
+            "source_type": self.source_type,
+            "headers": copy.deepcopy(self.headers),
+            "rows": copy.deepcopy(self.rows),
+            "expanded_rows": self._expanded_rows(),
+            "cell_spans": copy.deepcopy(self.cell_spans),
+            "metadata": copy.deepcopy(self.metadata),
+        }
+
     def _expanded_rows(self) -> List[List[Any]]:
         if self.expanded_rows:
             return copy.deepcopy(self.expanded_rows)

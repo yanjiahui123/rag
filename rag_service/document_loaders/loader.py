@@ -45,6 +45,7 @@ from rag_service.document_loaders.parsed_blocks import (
 from rag_service.document_loaders.ppt_helper_loader import PowerPointHelperLoader
 from rag_service.document_loaders.qa_loader import XlsxForQaLoader
 from rag_service.document_loaders.structured_docx_loader import StructuredDocxLoader
+from rag_service.document_loaders.structured_excel_loader import StructuredExcelLoader
 from rag_service.document_loaders.txt_loader import TextLoader
 from rag_service.logger import Module, get_logger
 from rag_service.models.enums import (
@@ -317,6 +318,23 @@ class StructuredDocxByBlockLoader(
         return blocks_to_documents(self.parse_blocks(), Document, text_splitter)
 
 
+class StructuredXlsxByBlockLoader(
+    BaseLoader,
+    loader_name="结构化XLSX加载器",
+    description="XLSX结构化解析加载器，按表格识别、切片并保留复杂表头展示产物",
+    processable_types=[FileExtension.XLSX],
+):
+    def __init__(self, file_path: str):
+        self.loader = StructuredExcelLoader(file_path)
+        self.degrade_loader = XlsxToMarkdownLoader(file_path)
+
+    def load(self) -> List[Document]:
+        return blocks_to_documents(self.parse_blocks(), Document, None)
+
+    def load_and_split(self, text_splitter: Optional[TextSplitter] = None) -> List[Document]:
+        return blocks_to_documents(self.parse_blocks(), Document, text_splitter)
+
+
 class PptHelperLoader(
     BaseLoader,
     loader_name="PPT助手加载器",
@@ -339,7 +357,7 @@ class QaXlsxLoader(
 
 _TYPE_TO_DEFAULT_LOADER: Dict[str, Type[BaseLoader]] = {
     FileExtension.PDF.value: PdfLoader,
-    FileExtension.XLSX.value: XlsxMarkdownLoader,
+    FileExtension.XLSX.value: StructuredXlsxByBlockLoader,
     FileExtension.XLS.value: XlsMarkdownLoader,
     FileExtension.DOCX.value: StructuredDocxByBlockLoader,
     FileExtension.DOC.value: DocxByHeadAndLengthLoader,

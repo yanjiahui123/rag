@@ -1,16 +1,18 @@
 from __future__ import annotations
 
-import copy
 from typing import Any, Dict, Iterable, List, Optional
 
 from pydantic import BaseModel, Field
 
 from rag_service.document_loaders.parsed_blocks import (
+    BLOCK_TYPE_TABLE,
     BLOCK_TYPE_TEXT,
     SPLIT_POLICY_MARKDOWN_HEADINGS,
+    SPLIT_POLICY_NO_SPLIT,
     ParsedBlock,
     ParsedDocument,
 )
+from rag_service.document_loaders.structured_artifacts import STRUCTURED_DOCX_ARTIFACTS_KEY
 from rag_service.document_loaders.structured_loader import StructuredDocumentLoader
 from rag_service.document_loaders.table.models import TableBlock
 from rag_service.document_loaders.table.docx_parser import DocxTableParser
@@ -21,7 +23,8 @@ class DocxMarkdownElement(BaseModel):
     block_index: int
     headers: List[str] = Field(default_factory=list)
     heading_level: Optional[int] = None
-    table_metadata: Optional[Dict[str, Any]] = None
+    table_id: Optional[str] = None
+    table_block: Optional[TableBlock] = None
 
 
 class StructuredDocxLoader(StructuredDocumentLoader):
@@ -126,13 +129,15 @@ class StructuredDocxLoader(StructuredDocumentLoader):
     def _table_element(self, table: Any, headers: List[str], block_index: int, table_index: int) -> DocxMarkdownElement:
         metadata = self._base_metadata(headers, block_index)
         metadata["table_index"] = table_index
+        metadata["table_id"] = self._table_id(table_index)
         metadata["title"] = headers[-1] if headers else ""
         table_block = self.table_parser.parse(table, metadata=metadata)
         return DocxMarkdownElement(
-            text=self._table_to_markdown(table_block),
+            text=self._table_search_text(table_block, headers),
             block_index=block_index,
             headers=list(headers),
-            table_metadata=table_block.to_parsed_block().metadata,
+            table_id=metadata["table_id"],
+            table_block=table_block,
         )
 
     def _base_metadata(self, headers: List[str], block_index: int) -> dict:
@@ -144,32 +149,123 @@ class StructuredDocxLoader(StructuredDocumentLoader):
         }
 
     def _document_from_elements(self, elements: List[DocxMarkdownElement]) -> ParsedDocument:
-        text = "\n\n".join(element.text for element in elements if element.text).strip()
-        metadata = self._document_metadata(elements)
-        return ParsedDocument(
-            text=text,
-            metadata=metadata,
-            split_policy=SPLIT_POLICY_MARKDOWN_HEADINGS,
+        blocks = self._blocks_from_elements(elements)
+        return ParsedDocument(blocks=blocks, metadata=self._document_metadata(elements, blocks))
+
+    def _document_metadata(self, elements: List[DocxMarkdownElement], blocks: List[ParsedBlock]) -> Dict[str, Any]:
+        metadata = self._base_metadata([], 0)
+        metadata[STRUCTURED_DOCX_ARTIFACTS_KEY] = {
+            "document_markdown": self._document_markdown(elements),
+            "manifest": self._manifest(blocks),
+            "tables": self._table_artifacts(elements),
+        }
+        return metadata
+
+    def _blocks_from_elements(self, elements: List[DocxMarkdownElement]) -> List[ParsedBlock]:
+        blocks = []
+        text_elements = []
+        for element in elements:
+            if element.table_block:
+                self._append_text_block(blocks, text_elements)
+                text_elements = []
+                blocks.append(self._table_parsed_block(element))
+            else:
+                text_elements.append(element)
+        self._append_text_block(blocks, text_elements)
+        return blocks
+
+    def _append_text_block(self, blocks: List[ParsedBlock], text_elements: List[DocxMarkdownElement]) -> None:
+        if not text_elements:
+            return
+        text = "\n\n".join(element.text for element in text_elements if element.text).strip()
+        if text:
+            blocks.append(
+                ParsedBlock(
+                    text=text,
+                    metadata=self._text_block_metadata(text_elements),
+                    split_policy=SPLIT_POLICY_MARKDOWN_HEADINGS,
+                )
+            )
+
+    def _text_block_metadata(self, text_elements: List[DocxMarkdownElement]) -> Dict[str, Any]:
+        first_element = text_elements[0]
+        headers = list(text_elements[-1].headers)
+        metadata = self._base_metadata(headers, first_element.block_index)
+        metadata["block_id"] = self._block_id(first_element.block_index)
+        metadata["title"] = headers[-1] if headers else ""
+        return metadata
+
+    def _table_parsed_block(self, element: DocxMarkdownElement) -> ParsedBlock:
+        return ParsedBlock(
+            text=element.text,
+            metadata=self._table_block_metadata(element),
+            block_type=BLOCK_TYPE_TABLE,
+            split_policy=SPLIT_POLICY_NO_SPLIT,
         )
 
-    def _document_metadata(self, elements: List[DocxMarkdownElement]) -> Dict[str, Any]:
-        metadata = self._base_metadata([], 0)
-        tables = [copy.deepcopy(element.table_metadata) for element in elements if element.table_metadata]
-        if tables:
-            metadata["tables"] = tables
+    def _table_block_metadata(self, element: DocxMarkdownElement) -> Dict[str, Any]:
+        table_block = element.table_block
+        metadata = self._base_metadata(element.headers, element.block_index)
+        metadata["block_id"] = self._block_id(element.block_index)
+        metadata["title"] = table_block.title
+        metadata["table_id"] = element.table_id
+        metadata["table"] = self._table_summary(table_block, element.table_id)
         return metadata
 
     @staticmethod
-    def _table_to_markdown(table_block: TableBlock) -> str:
+    def _table_summary(table_block: TableBlock, table_id: str) -> Dict[str, Any]:
+        return {
+            "table_id": table_id,
+            "title": table_block.title,
+            "source_type": table_block.source_type,
+            "flatten_headers": list(table_block.headers),
+            "row_count": len(table_block.rows),
+            "col_count": len(table_block.headers),
+        }
+
+    def _table_search_text(self, table_block: TableBlock, headers: List[str]) -> str:
         lines = []
-        if table_block.headers:
-            lines.append(_markdown_row(table_block.headers))
-            lines.append(_markdown_row(["---"] * len(table_block.headers)))
-        for row in table_block.rows:
-            lines.append(_markdown_row([str(value) for value in row]))
-        return "\n".join(lines)
+        if headers:
+            lines.append("section: " + " > ".join(headers))
+        lines.append(table_block.to_search_text())
+        return "\n".join(line for line in lines if line)
 
+    @staticmethod
+    def _document_markdown(elements: List[DocxMarkdownElement]) -> str:
+        return "\n\n".join(element.text for element in elements if element.text).strip()
 
-def _markdown_row(values: List[str]) -> str:
-    escaped_values = [value.replace("\n", " ").replace("|", "\\|").strip() for value in values]
-    return "| " + " | ".join(escaped_values) + " |"
+    @staticmethod
+    def _manifest(blocks: List[ParsedBlock]) -> Dict[str, Any]:
+        return {
+            "blocks": [
+                {
+                    "block_id": block.metadata.get("block_id"),
+                    "type": block.metadata.get("block_type", BLOCK_TYPE_TEXT),
+                    "title": block.metadata.get("title", ""),
+                    "headers": block.metadata.get("headers", []),
+                    "table_id": block.metadata.get("table_id"),
+                }
+                for block in blocks
+            ]
+        }
+
+    @staticmethod
+    def _table_artifacts(elements: List[DocxMarkdownElement]) -> List[Dict[str, Any]]:
+        return [
+            {
+                "table_id": element.table_id,
+                "html": element.table_block.display_html or "",
+                "json": element.table_block.to_artifact_dict(),
+                "llm_markdown": element.table_block.to_search_text(),
+            }
+            for element in elements
+            if element.table_block
+        ]
+
+    @staticmethod
+    def _block_id(block_index: int) -> str:
+        return f"block_{block_index + 1:03d}"
+
+    @staticmethod
+    def _table_id(table_index: int) -> str:
+        return f"table_{table_index + 1:03d}"

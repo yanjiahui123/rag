@@ -41,6 +41,16 @@ from rag_service.document_loaders.parsed_blocks import (
     blocks_to_parsed_document,
     documents_to_parsed_blocks,
 )
+from rag_service.document_loaders.structured_artifacts import (
+    extract_structured_docx_artifact_prefix,
+    extract_structured_excel_artifact_prefix,
+    merge_structured_metadata,
+    merge_structured_docx_metadata,
+    persist_structured_excel_artifacts,
+    persist_structured_docx_artifacts,
+    STRUCTURED_DOCX_METADATA_KEY,
+    STRUCTURED_EXCEL_METADATA_KEY,
+)
 from rag_service.logger import Module, get_logger
 from rag_service.models.database.models import AutoJobInstances, UpdatedOriginalDocument, VectorStore
 from rag_service.models.database.models import OriginalDocument as OriginalDocumentEntity
@@ -81,7 +91,7 @@ from rag_service.utils.db_util import (
 )
 from rag_service.utils.fetch_util import get_text_slices
 from rag_service.utils.git_fetch_util import handle_remove_readonly
-from rag_service.utils.his_util.obs_util import delete_dir, delete_object, get_obs_dir
+from rag_service.utils.his_util.obs_util import delete_dir, delete_object, get_obs_dir, upload_file_as_bytes
 from rag_service.utils.ipd_rag_util import send_data_to_dataops
 from rag_service.utils.serdes import deserialize
 from rag_service.utils.time_util import now_with_time_zone
@@ -144,16 +154,20 @@ def delete_knowledge_base_asset_resources(context: OpExecutionContext):
         knowledge_base_asset = get_knowledge_base_asset(
             session, knowledge_base_serial_number, knowledge_base_asset_name
         )
-        if not knowledge_base_asset.save_file:
-            return
         for vector_store in knowledge_base_asset.vector_stores:
-            delete_vector_store_resources(vector_store)
+            delete_vector_store_resources(vector_store, delete_download_key=knowledge_base_asset.save_file)
 
 
-def delete_vector_store_resources(vector_store: VectorStore):
+def delete_vector_store_resources(vector_store: VectorStore, delete_download_key: bool = True):
     for original_document in vector_store.original_documents:
-        if original_document.download_key:
+        if delete_download_key and original_document.download_key:
             delete_object(original_document.download_key)
+        artifact_prefix = extract_structured_docx_artifact_prefix(original_document.extended_metadata)
+        if artifact_prefix:
+            delete_dir(artifact_prefix)
+        artifact_prefix = extract_structured_excel_artifact_prefix(original_document.extended_metadata)
+        if artifact_prefix:
+            delete_dir(artifact_prefix)
 
 
 def document_deduplication(original_documents):
@@ -336,7 +350,72 @@ def parse_original_documents(
 def save_parsed_documents(
     context: OpExecutionContext, parsed_documents: List[Tuple[OriginalDocument, ParsedDocument]]
 ) -> List[Tuple[OriginalDocument, ParsedDocument]]:
+    knowledge_base_serial_number, knowledge_base_asset_name = parse_asset_partition_key(context.partition_key)
+    artifact_summaries = {}
+    for original_document, parsed_document in parsed_documents:
+        artifact_info = _persist_parsed_document_artifacts(
+            knowledge_base_serial_number,
+            knowledge_base_asset_name,
+            original_document,
+            parsed_document,
+        )
+        if artifact_info:
+            artifact_summaries[original_document.doc_id] = artifact_info
+    if artifact_summaries:
+        with Session(engine) as session:
+            _save_artifact_summaries(session, artifact_summaries)
+            session.commit()
     return parsed_documents
+
+
+def _persist_parsed_document_artifacts(
+    knowledge_base_serial_number: str,
+    knowledge_base_asset_name: str,
+    original_document: OriginalDocument,
+    parsed_document: ParsedDocument,
+) -> Dict[str, Any]:
+    summary = persist_structured_docx_artifacts(
+        parsed_document,
+        knowledge_base_serial_number,
+        knowledge_base_asset_name,
+        str(original_document.doc_id),
+        upload_file_as_bytes,
+    )
+    if summary:
+        original_document.extended_metadata = merge_structured_docx_metadata(
+            original_document.extended_metadata,
+            summary,
+        )
+        return {"metadata_key": STRUCTURED_DOCX_METADATA_KEY, "summary": summary}
+    summary = persist_structured_excel_artifacts(
+        parsed_document,
+        knowledge_base_serial_number,
+        knowledge_base_asset_name,
+        str(original_document.doc_id),
+        upload_file_as_bytes,
+    )
+    if summary:
+        original_document.extended_metadata = merge_structured_metadata(
+            original_document.extended_metadata,
+            STRUCTURED_EXCEL_METADATA_KEY,
+            summary,
+        )
+        return {"metadata_key": STRUCTURED_EXCEL_METADATA_KEY, "summary": summary}
+    return {}
+
+
+def _save_artifact_summaries(session: Session, artifact_summaries: Dict[Any, Dict[str, Any]]) -> None:
+    summaries_by_id = {str(doc_id): info for doc_id, info in artifact_summaries.items()}
+    documents = query_document_by_ids(session, list(artifact_summaries.keys()))
+    for document in documents:
+        artifact_info = summaries_by_id.get(str(document.id))
+        if artifact_info:
+            document.extended_metadata = merge_structured_metadata(
+                document.extended_metadata,
+                artifact_info["metadata_key"],
+                artifact_info["summary"],
+            )
+    session.add_all(documents)
 
 
 @op(retry_policy=RetryPolicy(max_retries=3), tags={"dagster/priority": 1})
