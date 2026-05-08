@@ -224,11 +224,7 @@ class StructuredDocxLoader(StructuredDocumentLoader):
         }
 
     def _table_search_text(self, table_block: TableBlock, headers: List[str]) -> str:
-        lines = []
-        if headers:
-            lines.append("section: " + " > ".join(headers))
-        lines.append(table_block.to_search_text())
-        return "\n".join(line for line in lines if line)
+        return table_block.to_llm_text(section_headers=headers)
 
     @staticmethod
     def _document_markdown(elements: List[DocxMarkdownElement]) -> str:
@@ -256,7 +252,7 @@ class StructuredDocxLoader(StructuredDocumentLoader):
                 "table_id": element.table_id,
                 "html": element.table_block.display_html or "",
                 "json": element.table_block.to_artifact_dict(),
-                "llm_markdown": element.table_block.to_search_text(),
+                "llm_markdown": element.table_block.to_llm_text(section_headers=element.headers),
             }
             for element in elements
             if element.table_block

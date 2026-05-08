@@ -48,16 +48,25 @@ class TableBlock(BaseModel):
         )
 
     def to_search_text(self) -> str:
+        return self.to_llm_text()
+
+    def to_llm_text(self, section_headers: Optional[List[str]] = None) -> str:
+        headers = _llm_headers(self.headers, self.rows)
         lines = []
+        section = _section_text(section_headers)
+        if section:
+            lines.append(f"section: {section}")
         if self.title:
             lines.append(f"table: {self.title}")
         if self.source_type:
             lines.append(f"source_type: {self.source_type}")
-        if self.headers:
-            lines.append(_markdown_row(self.headers))
-            lines.append(_markdown_row(["-"] * len(self.headers)))
-        for row in self.rows:
-            lines.append(_markdown_row([str(value) for value in row]))
+        if headers:
+            lines.append("fields:")
+            lines.extend([f"- {header}" for header in headers])
+        row_lines = _llm_row_lines(headers, self.rows)
+        if row_lines:
+            lines.append("rows:")
+            lines.extend(row_lines)
         return "\n".join(lines)
 
     def to_artifact_dict(self) -> Dict[str, Any]:
@@ -82,3 +91,42 @@ class TableBlock(BaseModel):
 def _markdown_row(values: List[str]) -> str:
     escaped_values = [value.replace("\n", " ").replace("|", "\\|").strip() for value in values]
     return "| " + " | ".join(escaped_values) + " |"
+
+
+def _section_text(section_headers: Optional[List[str]]) -> str:
+    return " > ".join(_clean_table_value(header) for header in section_headers or [] if _clean_table_value(header))
+
+
+def _llm_headers(headers: List[str], rows: List[List[Any]]) -> List[str]:
+    width = max([len(headers)] + [len(row) for row in rows] or [0])
+    return [_llm_header(headers, index) for index in range(width)]
+
+
+def _llm_header(headers: List[str], index: int) -> str:
+    if index < len(headers):
+        header = _clean_table_value(headers[index])
+        if header:
+            return header
+    return f"Column {index + 1}"
+
+
+def _llm_row_lines(headers: List[str], rows: List[List[Any]]) -> List[str]:
+    lines = []
+    for row_index, row in enumerate(rows):
+        pairs = _llm_row_pairs(headers, row)
+        if pairs:
+            lines.append(f"{row_index + 1}. " + "; ".join(pairs))
+    return lines
+
+
+def _llm_row_pairs(headers: List[str], row: List[Any]) -> List[str]:
+    pairs = []
+    for col_index, header in enumerate(headers):
+        value = _clean_table_value(row[col_index]) if col_index < len(row) else ""
+        if value:
+            pairs.append(f"{header}={value}")
+    return pairs
+
+
+def _clean_table_value(value: Any) -> str:
+    return " ".join(str(value or "").replace("\r", "\n").split())
