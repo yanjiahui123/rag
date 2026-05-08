@@ -1,19 +1,19 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 from html.parser import HTMLParser
 from typing import Dict, Iterable, List, Union
+
+from pydantic import BaseModel, Field
 
 
 HtmlChild = Union["HtmlNode", str]
 VOID_TAGS = {"area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "source", "wbr"}
 
 
-@dataclass
-class HtmlNode:
+class HtmlNode(BaseModel):
     tag: str
-    attrs: Dict[str, str] = field(default_factory=dict)
-    children: List[HtmlChild] = field(default_factory=list)
+    attrs: Dict[str, str] = Field(default_factory=dict)
+    children: List[HtmlChild] = Field(default_factory=list)
 
     def text(self) -> str:
         return _normalize_text(" ".join(_child_text(child) for child in self.children))
@@ -22,11 +22,11 @@ class HtmlNode:
 class _TreeBuilder(HTMLParser):
     def __init__(self):
         super().__init__(convert_charrefs=True)
-        self.root = HtmlNode("document")
+        self.root = HtmlNode(tag="document")
         self.stack = [self.root]
 
     def handle_starttag(self, tag: str, attrs):
-        node = HtmlNode(tag.lower(), {key: value or "" for key, value in attrs})
+        node = HtmlNode(tag=tag.lower(), attrs={key: value or "" for key, value in attrs})
         self.stack[-1].children.append(node)
         if node.tag not in VOID_TAGS:
             self.stack.append(node)

@@ -1,15 +1,15 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 from html import escape
 from typing import Any, Dict, List, Optional, Tuple
+
+from pydantic import BaseModel
 
 from rag_service.document_loaders.html_dom import HtmlNode, find_first, iter_nodes, parse_html
 from rag_service.document_loaders.table.models import TableBlock
 
 
-@dataclass
-class HtmlCellSpan:
+class HtmlCellSpan(BaseModel):
     text: str
     row: int
     col: int
