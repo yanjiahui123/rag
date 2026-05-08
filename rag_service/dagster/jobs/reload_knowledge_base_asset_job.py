@@ -1,0 +1,6 @@
+from dagster import define_asset_job
+
+from rag_service.dagster.assets.reload_knowledge_base_asset import reload_knowledge_base_asset
+
+RELOAD_KNOWLEDGE_BASE_ASSET_JOB_NAME = "reload_knowledge_base_asset_job"
+reload_knowledge_base_asset_job = define_asset_job(RELOAD_KNOWLEDGE_BASE_ASSET_JOB_NAME, [reload_knowledge_base_asset])

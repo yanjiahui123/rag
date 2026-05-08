@@ -44,13 +44,16 @@ from rag_service.document_loaders.parsed_blocks import (
 from rag_service.document_loaders.structured_artifacts import (
     extract_structured_docx_artifact_prefix,
     extract_structured_excel_artifact_prefix,
+    extract_structured_html_artifact_prefix,
     is_safe_structured_artifact_prefix,
     merge_structured_metadata,
     merge_structured_docx_metadata,
     persist_structured_excel_artifacts,
+    persist_structured_html_artifacts,
     persist_structured_docx_artifacts,
     STRUCTURED_DOCX_METADATA_KEY,
     STRUCTURED_EXCEL_METADATA_KEY,
+    STRUCTURED_HTML_METADATA_KEY,
 )
 from rag_service.logger import Module, get_logger
 from rag_service.models.database.models import AutoJobInstances, UpdatedOriginalDocument, VectorStore
@@ -166,6 +169,8 @@ def delete_vector_store_resources(vector_store: VectorStore, delete_download_key
         artifact_prefix = extract_structured_docx_artifact_prefix(original_document.extended_metadata)
         _delete_structured_artifact_prefix(artifact_prefix)
         artifact_prefix = extract_structured_excel_artifact_prefix(original_document.extended_metadata)
+        _delete_structured_artifact_prefix(artifact_prefix)
+        artifact_prefix = extract_structured_html_artifact_prefix(original_document.extended_metadata)
         _delete_structured_artifact_prefix(artifact_prefix)
 
 
@@ -409,6 +414,20 @@ def _persist_parsed_document_artifacts(
             summary,
         )
         return {"metadata_key": STRUCTURED_EXCEL_METADATA_KEY, "summary": summary}
+    summary = persist_structured_html_artifacts(
+        parsed_document,
+        knowledge_base_serial_number,
+        knowledge_base_asset_name,
+        str(original_document.doc_id),
+        upload_file_as_bytes,
+    )
+    if summary:
+        original_document.extended_metadata = merge_structured_metadata(
+            original_document.extended_metadata,
+            STRUCTURED_HTML_METADATA_KEY,
+            summary,
+        )
+        return {"metadata_key": STRUCTURED_HTML_METADATA_KEY, "summary": summary}
     return {}
 
 

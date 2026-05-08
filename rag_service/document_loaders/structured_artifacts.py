@@ -8,6 +8,8 @@ STRUCTURED_DOCX_ARTIFACTS_KEY = "_structured_docx_artifacts"
 STRUCTURED_DOCX_METADATA_KEY = "structured_docx"
 STRUCTURED_EXCEL_ARTIFACTS_KEY = "_structured_excel_artifacts"
 STRUCTURED_EXCEL_METADATA_KEY = "structured_excel"
+STRUCTURED_HTML_ARTIFACTS_KEY = "_structured_html_artifacts"
+STRUCTURED_HTML_METADATA_KEY = "structured_html"
 
 
 def build_structured_docx_artifact_prefix(kb_sn: str, asset_name: str, doc_id: str) -> str:
@@ -18,6 +20,10 @@ def build_structured_excel_artifact_prefix(kb_sn: str, asset_name: str, doc_id: 
     return _build_document_artifact_prefix(doc_id, "structured_excel")
 
 
+def build_structured_html_artifact_prefix(kb_sn: str, asset_name: str, doc_id: str) -> str:
+    return _build_document_artifact_prefix(doc_id, "structured_html")
+
+
 def _build_document_artifact_prefix(doc_id: str, artifact_type: str) -> str:
     return f"{doc_id}/{artifact_type}/"
 
@@ -25,7 +31,7 @@ def _build_document_artifact_prefix(doc_id: str, artifact_type: str) -> str:
 def is_safe_structured_artifact_prefix(prefix: Optional[str]) -> bool:
     if not prefix:
         return False
-    return bool(re.match(r"^[^/]+/(structured_docx|structured_excel)/$", prefix))
+    return bool(re.match(r"^[^/]+/(structured_docx|structured_excel|structured_html)/$", prefix))
 
 
 def extract_structured_docx_artifact_prefix(extended_metadata: Optional[Dict[str, Any]]) -> Optional[str]:
@@ -34,6 +40,10 @@ def extract_structured_docx_artifact_prefix(extended_metadata: Optional[Dict[str
 
 def extract_structured_excel_artifact_prefix(extended_metadata: Optional[Dict[str, Any]]) -> Optional[str]:
     return _extract_artifact_prefix(extended_metadata, STRUCTURED_EXCEL_METADATA_KEY)
+
+
+def extract_structured_html_artifact_prefix(extended_metadata: Optional[Dict[str, Any]]) -> Optional[str]:
+    return _extract_artifact_prefix(extended_metadata, STRUCTURED_HTML_METADATA_KEY)
 
 
 def _extract_artifact_prefix(extended_metadata: Optional[Dict[str, Any]], metadata_key: str) -> Optional[str]:
@@ -55,6 +65,13 @@ def merge_structured_excel_metadata(
     artifact_summary: Dict[str, Any],
 ) -> Dict[str, Any]:
     return merge_structured_metadata(extended_metadata, STRUCTURED_EXCEL_METADATA_KEY, artifact_summary)
+
+
+def merge_structured_html_metadata(
+    extended_metadata: Optional[Dict[str, Any]],
+    artifact_summary: Dict[str, Any],
+) -> Dict[str, Any]:
+    return merge_structured_metadata(extended_metadata, STRUCTURED_HTML_METADATA_KEY, artifact_summary)
 
 
 def merge_structured_metadata(
@@ -95,6 +112,22 @@ def persist_structured_excel_artifacts(
         build_structured_excel_artifact_prefix(kb_sn, asset_name, doc_id),
         STRUCTURED_EXCEL_ARTIFACTS_KEY,
         STRUCTURED_EXCEL_METADATA_KEY,
+        upload_content,
+    )
+
+
+def persist_structured_html_artifacts(
+    parsed_document: Any,
+    kb_sn: str,
+    asset_name: str,
+    doc_id: str,
+    upload_content: Callable[[str, str], str],
+) -> Dict[str, Any]:
+    return _persist_structured_artifacts(
+        parsed_document,
+        build_structured_html_artifact_prefix(kb_sn, asset_name, doc_id),
+        STRUCTURED_HTML_ARTIFACTS_KEY,
+        STRUCTURED_HTML_METADATA_KEY,
         upload_content,
     )
 

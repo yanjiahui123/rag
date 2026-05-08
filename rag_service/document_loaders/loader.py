@@ -46,6 +46,7 @@ from rag_service.document_loaders.ppt_helper_loader import PowerPointHelperLoade
 from rag_service.document_loaders.qa_loader import XlsxForQaLoader
 from rag_service.document_loaders.structured_docx_loader import StructuredDocxLoader
 from rag_service.document_loaders.structured_excel_loader import StructuredExcelLoader
+from rag_service.document_loaders.structured_html_loader import StructuredHtmlLoader
 from rag_service.document_loaders.txt_loader import TextLoader
 from rag_service.logger import Module, get_logger
 from rag_service.models.enums import (
@@ -335,6 +336,23 @@ class StructuredXlsxByBlockLoader(
         return blocks_to_documents(self.parse_blocks(), Document, text_splitter)
 
 
+class StructuredHtmlByBlockLoader(
+    BaseLoader,
+    loader_name="结构化HTML加载器",
+    description="HTML结构化解析加载器，按正文和表格输出ParsedDocument并保留复杂表格展示产物",
+    processable_types=[FileExtension.HTML],
+):
+    def __init__(self, file_path: str):
+        self.loader = StructuredHtmlLoader(file_path)
+        self.degrade_loader = BSHTMLLoader(file_path)
+
+    def load(self) -> List[Document]:
+        return blocks_to_documents(self.parse_blocks(), Document, None)
+
+    def load_and_split(self, text_splitter: Optional[TextSplitter] = None) -> List[Document]:
+        return blocks_to_documents(self.parse_blocks(), Document, text_splitter)
+
+
 class PptHelperLoader(
     BaseLoader,
     loader_name="PPT助手加载器",
@@ -365,7 +383,7 @@ _TYPE_TO_DEFAULT_LOADER: Dict[str, Type[BaseLoader]] = {
     FileExtension.PPT.value: PptLoader,
     FileExtension.TXT.value: TxtLoader,
     FileExtension.MARKDOWN.value: MarkdownToHTMLByHeadAndLengthLoader,
-    FileExtension.HTML.value: HTMLByHeadAndLengthLoader,
+    FileExtension.HTML.value: StructuredHtmlByBlockLoader,
 }
 
 _LOADERS_WITH_CHUNK_SIZE = [HTMLByHeadAndLengthLoader, MarkdownToHTMLByHeadAndLengthLoader, DocxByHeadAndLengthLoader]
