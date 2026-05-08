@@ -10,6 +10,17 @@ STRUCTURED_EXCEL_ARTIFACTS_KEY = "_structured_excel_artifacts"
 STRUCTURED_EXCEL_METADATA_KEY = "structured_excel"
 STRUCTURED_HTML_ARTIFACTS_KEY = "_structured_html_artifacts"
 STRUCTURED_HTML_METADATA_KEY = "structured_html"
+STRUCTURED_MARKDOWN_ARTIFACTS_KEY = "_structured_markdown_artifacts"
+STRUCTURED_MARKDOWN_METADATA_KEY = "structured_markdown"
+PARSED_MARKDOWN_METADATA_KEY = "parsed_markdown"
+
+_SAFE_ARTIFACT_TYPES = (
+    "structured_docx",
+    "structured_excel",
+    "structured_html",
+    "structured_markdown",
+    "parsed_markdown",
+)
 
 
 def build_structured_docx_artifact_prefix(kb_sn: str, asset_name: str, doc_id: str) -> str:
@@ -24,6 +35,14 @@ def build_structured_html_artifact_prefix(kb_sn: str, asset_name: str, doc_id: s
     return _build_document_artifact_prefix(doc_id, "structured_html")
 
 
+def build_structured_markdown_artifact_prefix(kb_sn: str, asset_name: str, doc_id: str) -> str:
+    return _build_document_artifact_prefix(doc_id, "structured_markdown")
+
+
+def build_parsed_markdown_artifact_prefix(kb_sn: str, asset_name: str, doc_id: str) -> str:
+    return _build_document_artifact_prefix(doc_id, "parsed_markdown")
+
+
 def _build_document_artifact_prefix(doc_id: str, artifact_type: str) -> str:
     return f"{doc_id}/{artifact_type}/"
 
@@ -31,7 +50,7 @@ def _build_document_artifact_prefix(doc_id: str, artifact_type: str) -> str:
 def is_safe_structured_artifact_prefix(prefix: Optional[str]) -> bool:
     if not prefix:
         return False
-    return bool(re.match(r"^[^/]+/(structured_docx|structured_excel|structured_html)/$", prefix))
+    return bool(re.match(rf"^[^/]+/({'|'.join(_SAFE_ARTIFACT_TYPES)})/$", prefix))
 
 
 def extract_structured_docx_artifact_prefix(extended_metadata: Optional[Dict[str, Any]]) -> Optional[str]:
@@ -44,6 +63,14 @@ def extract_structured_excel_artifact_prefix(extended_metadata: Optional[Dict[st
 
 def extract_structured_html_artifact_prefix(extended_metadata: Optional[Dict[str, Any]]) -> Optional[str]:
     return _extract_artifact_prefix(extended_metadata, STRUCTURED_HTML_METADATA_KEY)
+
+
+def extract_structured_markdown_artifact_prefix(extended_metadata: Optional[Dict[str, Any]]) -> Optional[str]:
+    return _extract_artifact_prefix(extended_metadata, STRUCTURED_MARKDOWN_METADATA_KEY)
+
+
+def extract_parsed_markdown_artifact_prefix(extended_metadata: Optional[Dict[str, Any]]) -> Optional[str]:
+    return _extract_artifact_prefix(extended_metadata, PARSED_MARKDOWN_METADATA_KEY)
 
 
 def _extract_artifact_prefix(extended_metadata: Optional[Dict[str, Any]], metadata_key: str) -> Optional[str]:
@@ -72,6 +99,13 @@ def merge_structured_html_metadata(
     artifact_summary: Dict[str, Any],
 ) -> Dict[str, Any]:
     return merge_structured_metadata(extended_metadata, STRUCTURED_HTML_METADATA_KEY, artifact_summary)
+
+
+def merge_structured_markdown_metadata(
+    extended_metadata: Optional[Dict[str, Any]],
+    artifact_summary: Dict[str, Any],
+) -> Dict[str, Any]:
+    return merge_structured_metadata(extended_metadata, STRUCTURED_MARKDOWN_METADATA_KEY, artifact_summary)
 
 
 def merge_structured_metadata(
@@ -130,6 +164,40 @@ def persist_structured_html_artifacts(
         STRUCTURED_HTML_METADATA_KEY,
         upload_content,
     )
+
+
+def persist_structured_markdown_artifacts(
+    parsed_document: Any,
+    kb_sn: str,
+    asset_name: str,
+    doc_id: str,
+    upload_content: Callable[[str, str], str],
+) -> Dict[str, Any]:
+    return _persist_structured_artifacts(
+        parsed_document,
+        build_structured_markdown_artifact_prefix(kb_sn, asset_name, doc_id),
+        STRUCTURED_MARKDOWN_ARTIFACTS_KEY,
+        STRUCTURED_MARKDOWN_METADATA_KEY,
+        upload_content,
+    )
+
+
+def persist_parsed_markdown_artifact(
+    parsed_document: Any,
+    kb_sn: str,
+    asset_name: str,
+    doc_id: str,
+    upload_content: Callable[[str, str], str],
+) -> Dict[str, Any]:
+    document_markdown = _parsed_document_markdown(parsed_document)
+    if not document_markdown:
+        return {}
+    prefix = build_parsed_markdown_artifact_prefix(kb_sn, asset_name, doc_id)
+    document_key = prefix + "document.md"
+    upload_content(document_key, document_markdown)
+    summary = _parsed_markdown_summary(prefix, document_key, parsed_document)
+    parsed_document.metadata[PARSED_MARKDOWN_METADATA_KEY] = summary
+    return summary
 
 
 def _persist_structured_artifacts(
@@ -217,6 +285,21 @@ def _artifact_summary(prefix, document_key, manifest_key, parsed_document, table
         "manifest_key": manifest_key,
         "table_count": len(table_refs),
         "block_count": len(parsed_document.blocks),
+    }
+
+
+def _parsed_document_markdown(parsed_document: Any) -> str:
+    if getattr(parsed_document, "text", ""):
+        return parsed_document.text.strip()
+    block_texts = [block.text for block in getattr(parsed_document, "blocks", []) if block.text]
+    return "\n\n".join(block_texts).strip()
+
+
+def _parsed_markdown_summary(prefix: str, document_key: str, parsed_document: Any) -> Dict[str, Any]:
+    return {
+        "artifact_prefix": prefix,
+        "document_markdown_key": document_key,
+        "block_count": len(getattr(parsed_document, "blocks", [])),
     }
 
 

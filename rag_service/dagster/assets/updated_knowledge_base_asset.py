@@ -21,10 +21,12 @@ from rag_service.dagster.dagster_common_op import (
     dummy_immediate_consumer,
     embedding_documents,
     insert_update_record,
-    load_original_documents,
     no_op_fan_in,
+    parse_original_documents,
     punctuation_detect,
     save_delayed_detection_document_data,
+    save_parsed_documents,
+    split_parsed_documents,
     store_chunks_to_vector_db,
     update_document_status,
     update_knowledge_base_and_asset_updated_at, document_deduplication, get_max_documents_num, sensitive_words_detect,
@@ -333,13 +335,16 @@ def change_update_vectorization_job_status_to_success(context: OpExecutionContex
 @graph_asset(partitions_def=knowledge_base_asset_partitions_def)
 def update_knowledge_base_asset():
     # 文档向量化流程
-    documents = fetch_updated_original_documents(
+    document_batches = fetch_updated_original_documents(
         delete_database_original_documents(
             delete_documents_in_vector_store(
                 fetch_updated_original_document_set(change_vectorization_job_status_to_started())
             )
         )
-    ).map(load_original_documents)
+    )
+    parsed_documents = document_batches.map(parse_original_documents)
+    parsed_documents = parsed_documents.map(save_parsed_documents)
+    documents = parsed_documents.map(split_parsed_documents)
     # 执行敏感信息检查，对包含敏感信息的文本进行脱敏处理
     documents = documents.map(sensitive_words_detect)
     embeddings = documents.map(embedding_documents)

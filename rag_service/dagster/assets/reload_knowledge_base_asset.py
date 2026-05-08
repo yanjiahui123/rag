@@ -13,11 +13,13 @@ from rag_service.dagster.dagster_common_op import (
     dummy_immediate_consumer,
     embedding_documents,
     fetch_raw_document,
-    load_original_documents,
     no_op_fan_in,
+    parse_original_documents,
     punctuation_detect,
     save_delayed_detection_document_data,
     save_document_metadata,
+    save_parsed_documents,
+    split_parsed_documents,
     store_chunks_to_vector_db,
     update_document_status,
     update_knowledge_base_and_asset_updated_at,
@@ -45,7 +47,7 @@ def delete_kba_database_vector_store(context: OpExecutionContext):
 @graph_asset(partitions_def=knowledge_base_asset_partitions_def)
 def reload_knowledge_base_asset():
     # 文档向量化流程
-    documents = save_document_metadata(
+    document_batches = save_document_metadata(
         fetch_raw_document(
             delete_kba_database_vector_store(
                 delete_knowledge_base_asset_resources(
@@ -53,7 +55,10 @@ def reload_knowledge_base_asset():
                 )
             )
         )
-    ).map(load_original_documents)
+    )
+    parsed_documents = document_batches.map(parse_original_documents)
+    parsed_documents = parsed_documents.map(save_parsed_documents)
+    documents = parsed_documents.map(split_parsed_documents)
     # 执行敏感信息检查，对包含敏感信息的文本进行脱敏处理
     documents = documents.map(sensitive_words_detect)
     embeddings = documents.map(embedding_documents)

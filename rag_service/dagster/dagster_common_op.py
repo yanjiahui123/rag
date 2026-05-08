@@ -42,18 +42,24 @@ from rag_service.document_loaders.parsed_blocks import (
     documents_to_parsed_blocks,
 )
 from rag_service.document_loaders.structured_artifacts import (
+    extract_parsed_markdown_artifact_prefix,
     extract_structured_docx_artifact_prefix,
     extract_structured_excel_artifact_prefix,
     extract_structured_html_artifact_prefix,
+    extract_structured_markdown_artifact_prefix,
     is_safe_structured_artifact_prefix,
     merge_structured_metadata,
     merge_structured_docx_metadata,
+    persist_parsed_markdown_artifact,
     persist_structured_excel_artifacts,
     persist_structured_html_artifacts,
     persist_structured_docx_artifacts,
+    persist_structured_markdown_artifacts,
+    PARSED_MARKDOWN_METADATA_KEY,
     STRUCTURED_DOCX_METADATA_KEY,
     STRUCTURED_EXCEL_METADATA_KEY,
     STRUCTURED_HTML_METADATA_KEY,
+    STRUCTURED_MARKDOWN_METADATA_KEY,
 )
 from rag_service.logger import Module, get_logger
 from rag_service.models.database.models import AutoJobInstances, UpdatedOriginalDocument, VectorStore
@@ -166,12 +172,18 @@ def delete_vector_store_resources(vector_store: VectorStore, delete_download_key
     for original_document in vector_store.original_documents:
         if delete_download_key and original_document.download_key:
             delete_object(original_document.download_key)
-        artifact_prefix = extract_structured_docx_artifact_prefix(original_document.extended_metadata)
-        _delete_structured_artifact_prefix(artifact_prefix)
-        artifact_prefix = extract_structured_excel_artifact_prefix(original_document.extended_metadata)
-        _delete_structured_artifact_prefix(artifact_prefix)
-        artifact_prefix = extract_structured_html_artifact_prefix(original_document.extended_metadata)
-        _delete_structured_artifact_prefix(artifact_prefix)
+        for artifact_prefix in _artifact_prefixes_to_delete(original_document.extended_metadata):
+            _delete_structured_artifact_prefix(artifact_prefix)
+
+
+def _artifact_prefixes_to_delete(extended_metadata: Optional[Dict[str, Any]]) -> List[Optional[str]]:
+    return [
+        extract_structured_docx_artifact_prefix(extended_metadata),
+        extract_structured_excel_artifact_prefix(extended_metadata),
+        extract_structured_html_artifact_prefix(extended_metadata),
+        extract_structured_markdown_artifact_prefix(extended_metadata),
+        extract_parsed_markdown_artifact_prefix(extended_metadata),
+    ]
 
 
 def _delete_structured_artifact_prefix(artifact_prefix: Optional[str]) -> None:
@@ -387,48 +399,43 @@ def _persist_parsed_document_artifacts(
     original_document: OriginalDocument,
     parsed_document: ParsedDocument,
 ) -> Dict[str, Any]:
-    summary = persist_structured_docx_artifacts(
-        parsed_document,
-        knowledge_base_serial_number,
-        knowledge_base_asset_name,
-        str(original_document.doc_id),
-        upload_file_as_bytes,
-    )
-    if summary:
-        original_document.extended_metadata = merge_structured_docx_metadata(
+    for persist_func, metadata_key in _artifact_persisters():
+        summary = persist_func(
+            parsed_document,
+            knowledge_base_serial_number,
+            knowledge_base_asset_name,
+            str(original_document.doc_id),
+            upload_file_as_bytes,
+        )
+        if not summary:
+            continue
+        original_document.extended_metadata = _merge_artifact_metadata(
             original_document.extended_metadata,
+            metadata_key,
             summary,
         )
-        return {"metadata_key": STRUCTURED_DOCX_METADATA_KEY, "summary": summary}
-    summary = persist_structured_excel_artifacts(
-        parsed_document,
-        knowledge_base_serial_number,
-        knowledge_base_asset_name,
-        str(original_document.doc_id),
-        upload_file_as_bytes,
-    )
-    if summary:
-        original_document.extended_metadata = merge_structured_metadata(
-            original_document.extended_metadata,
-            STRUCTURED_EXCEL_METADATA_KEY,
-            summary,
-        )
-        return {"metadata_key": STRUCTURED_EXCEL_METADATA_KEY, "summary": summary}
-    summary = persist_structured_html_artifacts(
-        parsed_document,
-        knowledge_base_serial_number,
-        knowledge_base_asset_name,
-        str(original_document.doc_id),
-        upload_file_as_bytes,
-    )
-    if summary:
-        original_document.extended_metadata = merge_structured_metadata(
-            original_document.extended_metadata,
-            STRUCTURED_HTML_METADATA_KEY,
-            summary,
-        )
-        return {"metadata_key": STRUCTURED_HTML_METADATA_KEY, "summary": summary}
+        return {"metadata_key": metadata_key, "summary": summary}
     return {}
+
+
+def _artifact_persisters():
+    return [
+        (persist_structured_docx_artifacts, STRUCTURED_DOCX_METADATA_KEY),
+        (persist_structured_excel_artifacts, STRUCTURED_EXCEL_METADATA_KEY),
+        (persist_structured_html_artifacts, STRUCTURED_HTML_METADATA_KEY),
+        (persist_structured_markdown_artifacts, STRUCTURED_MARKDOWN_METADATA_KEY),
+        (persist_parsed_markdown_artifact, PARSED_MARKDOWN_METADATA_KEY),
+    ]
+
+
+def _merge_artifact_metadata(
+    extended_metadata: Optional[Dict[str, Any]],
+    metadata_key: str,
+    summary: Dict[str, Any],
+):
+    if metadata_key == STRUCTURED_DOCX_METADATA_KEY:
+        return merge_structured_docx_metadata(extended_metadata, summary)
+    return merge_structured_metadata(extended_metadata, metadata_key, summary)
 
 
 def _save_artifact_summaries(session: Session, artifact_summaries: Dict[Any, Dict[str, Any]]) -> None:

@@ -47,6 +47,7 @@ from rag_service.document_loaders.qa_loader import XlsxForQaLoader
 from rag_service.document_loaders.structured_docx_loader import StructuredDocxLoader
 from rag_service.document_loaders.structured_excel_loader import StructuredExcelLoader
 from rag_service.document_loaders.structured_html_loader import StructuredHtmlLoader
+from rag_service.document_loaders.structured_markdown_loader import StructuredMarkdownLoader
 from rag_service.document_loaders.txt_loader import TextLoader
 from rag_service.logger import Module, get_logger
 from rag_service.models.enums import (
@@ -353,6 +354,23 @@ class StructuredHtmlByBlockLoader(
         return blocks_to_documents(self.parse_blocks(), Document, text_splitter)
 
 
+class StructuredMarkdownByBlockLoader(
+    BaseLoader,
+    loader_name="structured Markdown loader",
+    description="Markdown structured loader that preserves the original markdown and lets heading-aware splitting run later",
+    processable_types=[FileExtension.MARKDOWN],
+):
+    def __init__(self, file_path: str):
+        self.loader = StructuredMarkdownLoader(file_path)
+        self.degrade_loader = UnstructuredMarkdownLoader(file_path)
+
+    def load(self) -> List[Document]:
+        return blocks_to_documents(self.parse_blocks(), Document, None)
+
+    def load_and_split(self, text_splitter: Optional[TextSplitter] = None) -> List[Document]:
+        return blocks_to_documents(self.parse_blocks(), Document, text_splitter)
+
+
 class PptHelperLoader(
     BaseLoader,
     loader_name="PPT助手加载器",
@@ -382,7 +400,7 @@ _TYPE_TO_DEFAULT_LOADER: Dict[str, Type[BaseLoader]] = {
     FileExtension.PPTX.value: PptLoader,
     FileExtension.PPT.value: PptLoader,
     FileExtension.TXT.value: TxtLoader,
-    FileExtension.MARKDOWN.value: MarkdownToHTMLByHeadAndLengthLoader,
+    FileExtension.MARKDOWN.value: StructuredMarkdownByBlockLoader,
     FileExtension.HTML.value: StructuredHtmlByBlockLoader,
 }
 
