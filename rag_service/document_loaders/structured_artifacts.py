@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
+import re
 from typing import Any, Callable, Dict, Optional
 
 STRUCTURED_DOCX_ARTIFACTS_KEY = "_structured_docx_artifacts"
@@ -11,11 +11,21 @@ STRUCTURED_EXCEL_METADATA_KEY = "structured_excel"
 
 
 def build_structured_docx_artifact_prefix(kb_sn: str, asset_name: str, doc_id: str) -> str:
-    return (Path(kb_sn) / asset_name / "parsed" / "structured_docx" / str(doc_id)).as_posix() + "/"
+    return _build_document_artifact_prefix(doc_id, "structured_docx")
 
 
 def build_structured_excel_artifact_prefix(kb_sn: str, asset_name: str, doc_id: str) -> str:
-    return (Path(kb_sn) / asset_name / "parsed" / "structured_excel" / str(doc_id)).as_posix() + "/"
+    return _build_document_artifact_prefix(doc_id, "structured_excel")
+
+
+def _build_document_artifact_prefix(doc_id: str, artifact_type: str) -> str:
+    return f"{doc_id}/{artifact_type}/"
+
+
+def is_safe_structured_artifact_prefix(prefix: Optional[str]) -> bool:
+    if not prefix:
+        return False
+    return bool(re.match(r"^[^/]+/(structured_docx|structured_excel)/$", prefix))
 
 
 def extract_structured_docx_artifact_prefix(extended_metadata: Optional[Dict[str, Any]]) -> Optional[str]:

@@ -44,6 +44,7 @@ from rag_service.document_loaders.parsed_blocks import (
 from rag_service.document_loaders.structured_artifacts import (
     extract_structured_docx_artifact_prefix,
     extract_structured_excel_artifact_prefix,
+    is_safe_structured_artifact_prefix,
     merge_structured_metadata,
     merge_structured_docx_metadata,
     persist_structured_excel_artifacts,
@@ -163,11 +164,18 @@ def delete_vector_store_resources(vector_store: VectorStore, delete_download_key
         if delete_download_key and original_document.download_key:
             delete_object(original_document.download_key)
         artifact_prefix = extract_structured_docx_artifact_prefix(original_document.extended_metadata)
-        if artifact_prefix:
-            delete_dir(artifact_prefix)
+        _delete_structured_artifact_prefix(artifact_prefix)
         artifact_prefix = extract_structured_excel_artifact_prefix(original_document.extended_metadata)
-        if artifact_prefix:
-            delete_dir(artifact_prefix)
+        _delete_structured_artifact_prefix(artifact_prefix)
+
+
+def _delete_structured_artifact_prefix(artifact_prefix: Optional[str]) -> None:
+    if not artifact_prefix:
+        return
+    if is_safe_structured_artifact_prefix(artifact_prefix):
+        delete_dir(artifact_prefix)
+        return
+    logger.warning("Skip unsafe structured artifact prefix deletion: %s", artifact_prefix)
 
 
 def document_deduplication(original_documents):
