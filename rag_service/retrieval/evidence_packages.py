@@ -24,6 +24,10 @@ class EvidencePackageOptions(BaseModel):
     package_top_k: int = 5
     max_evidence_per_package: int = 6
     artifact_mode: str = "key"
+    enable_table_expansion: bool = True
+    table_expand_ratio_threshold: float = 0.7
+    max_full_table_rows: int = 500
+    max_inline_table_chars: int = 40000
 
 
 class ArtifactSummary(BaseModel):
@@ -39,15 +43,54 @@ class ArtifactSummary(BaseModel):
 class EvidenceItem(BaseModel):
     text: str
     score: float
+    evidence_type: Optional[str] = None
+    mode: Optional[str] = None
     block_id: Optional[str] = None
     block_type: Optional[str] = None
     table_id: Optional[str] = None
+    row_range: Optional[Tuple[int, int]] = None
+    row_count: Optional[int] = None
+    hit_rows: Optional[int] = None
+    hit_blocks: Optional[int] = None
+    hit_ratio: Optional[float] = None
+    merged_block_ids: List[str] = Field(default_factory=list)
     title: Optional[str] = None
     headers: List[str] = Field(default_factory=list)
     table: Optional[Dict[str, Any]] = None
     refs: Dict[str, str] = Field(default_factory=dict)
+    artifact_keys: Dict[str, str] = Field(default_factory=dict, exclude=True)
     es_index: Optional[str] = None
     es_doc_id: Optional[str] = None
+
+
+class TableExpansion(BaseModel):
+    type: str = "table"
+    mode: str
+    table_id: str
+    title: Optional[str] = None
+    row_count: int = 0
+    hit_rows: int = 0
+    hit_blocks: int = 0
+    hit_ratio: float = 0.0
+    score: float = 0.0
+    table: Optional[Dict[str, Any]] = None
+    refs: Dict[str, str] = Field(default_factory=dict)
+
+
+class TableContext(BaseModel):
+    type: str = "table"
+    mode: str
+    table_id: str
+    title: Optional[str] = None
+    row_count: int = 0
+    hit_rows: int = 0
+    hit_blocks: int = 0
+    hit_ratio: float = 0.0
+    score: float = 0.0
+    expanded: bool = False
+    table: Optional[Dict[str, Any]] = None
+    refs: Dict[str, str] = Field(default_factory=dict)
+    artifact_keys: Dict[str, str] = Field(default_factory=dict, exclude=True)
 
 
 class DocumentEvidencePackage(BaseModel):
@@ -60,6 +103,8 @@ class DocumentEvidencePackage(BaseModel):
     evidence_count: int
     artifact_summary: Optional[ArtifactSummary]
     evidence: List[EvidenceItem] = Field(default_factory=list)
+    expansions: List[TableExpansion] = Field(default_factory=list)
+    table_contexts: List[TableContext] = Field(default_factory=list)
 
 
 class EvidencePackageResponse(BaseModel):
@@ -72,6 +117,7 @@ class EvidencePackageResponse(BaseModel):
 
 
 ArtifactUrlResolver = Callable[[str], str]
+ArtifactTextResolver = Callable[[str], Optional[str]]
 Retriever = Callable[[], Optional[Iterable[Any]]]
 
 
@@ -160,10 +206,12 @@ def build_evidence_packages(
     documents: Iterable[Any],
     options: Optional[EvidencePackageOptions] = None,
     artifact_url_resolver: Optional[ArtifactUrlResolver] = None,
+    artifact_text_resolver: Optional[ArtifactTextResolver] = None,
 ) -> EvidencePackageResponse:
     options = options or EvidencePackageOptions()
     document_list = list(documents)
     artifact_url_resolver = _prepared_artifact_url_resolver(document_list, options, artifact_url_resolver)
+    artifact_text_resolver = _memoized_text_resolver(artifact_text_resolver)
     package_limit = max(options.package_top_k, 0)
     evidence_limit = max(options.max_evidence_per_package, 0)
     groups: Dict[Tuple[Optional[str], Optional[str], str], _PackageAccumulator] = {}
@@ -183,7 +231,10 @@ def build_evidence_packages(
             )
         groups[group_key].add(_evidence_item(document, metadata, options, artifact_url_resolver))
 
-    packages = [group.to_package(evidence_limit) for group in groups.values()]
+    packages = [
+        group.to_package(evidence_limit, options, artifact_text_resolver)
+        for group in groups.values()
+    ]
     packages.sort(key=lambda package: package.score, reverse=True)
     if package_limit:
         packages = packages[:package_limit]
@@ -261,6 +312,24 @@ def _memoized_resolver(
     return resolve
 
 
+def _memoized_text_resolver(
+    artifact_text_resolver: Optional[ArtifactTextResolver],
+) -> Optional[ArtifactTextResolver]:
+    if artifact_text_resolver is None:
+        return None
+    cache: Dict[str, Optional[str]] = {}
+
+    def resolve(ref: str) -> Optional[str]:
+        if ref not in cache:
+            try:
+                cache[ref] = artifact_text_resolver(ref)
+            except Exception:
+                cache[ref] = None
+        return cache[ref]
+
+    return resolve
+
+
 class _PackageAccumulator:
     def __init__(
         self,
@@ -285,12 +354,16 @@ class _PackageAccumulator:
         if current is None or item.score > current.score:
             self._items_by_key[key] = item
 
-    def to_package(self, evidence_limit: int) -> DocumentEvidencePackage:
-        evidence = sorted(self._items_by_key.values(), key=lambda item: item.score, reverse=True)
-        if evidence_limit:
-            evidence = evidence[:evidence_limit]
-        else:
-            evidence = []
+    def to_package(
+        self,
+        evidence_limit: int,
+        options: EvidencePackageOptions,
+        artifact_text_resolver: Optional[ArtifactTextResolver],
+    ) -> DocumentEvidencePackage:
+        all_evidence = sorted(self._items_by_key.values(), key=lambda item: item.score, reverse=True)
+        table_contexts = _table_contexts(all_evidence, options, artifact_text_resolver)
+        expansions = _table_expansions_from_contexts(table_contexts)
+        evidence = _package_evidence(all_evidence, table_contexts, evidence_limit)
         score = _package_score(evidence, len(self._items_by_key), self.artifact_summary)
         return DocumentEvidencePackage(
             kb_sn=self.kb_sn,
@@ -302,6 +375,8 @@ class _PackageAccumulator:
             evidence_count=len(self._items_by_key),
             artifact_summary=self.artifact_summary,
             evidence=evidence,
+            expansions=expansions,
+            table_contexts=table_contexts,
         )
 
 
@@ -317,10 +392,12 @@ def _evidence_item(
         block_id=_optional_string(metadata.get("block_id")),
         block_type=_optional_string(metadata.get("block_type")),
         table_id=_optional_string(metadata.get("table_id")),
+        row_range=_row_range(metadata.get("row_range")),
         title=_optional_string(metadata.get("title")),
         headers=list(metadata.get("headers") or []),
         table=_optional_dict(metadata.get("table")),
         refs=_artifact_refs(metadata, options, artifact_url_resolver),
+        artifact_keys=_artifact_keys(metadata),
         es_index=_optional_string(getattr(document, "es_index", None)),
         es_doc_id=_optional_string(getattr(document, "es_doc_id", None)),
     )
@@ -360,6 +437,14 @@ def _artifact_refs(
     return refs
 
 
+def _artifact_keys(metadata: Dict[str, Any]) -> Dict[str, str]:
+    return {
+        response_key: str(metadata[metadata_key])
+        for metadata_key, response_key in REF_FIELD_MAP.items()
+        if metadata.get(metadata_key)
+    }
+
+
 def _resolve_artifact_ref(
     ref: Optional[str],
     options: EvidencePackageOptions,
@@ -383,6 +468,235 @@ def _evidence_key(item: EvidenceItem) -> Tuple[str, str]:
     if item.table_id:
         return "table", item.table_id
     return "text", item.text
+
+
+def _table_contexts(
+    items: List[EvidenceItem],
+    options: EvidencePackageOptions,
+    artifact_text_resolver: Optional[ArtifactTextResolver],
+) -> List[TableContext]:
+    if not options.enable_table_expansion:
+        return []
+    contexts = [
+        context
+        for context in (
+            _table_context(table_id, table_items, options)
+            for table_id, table_items in _group_table_items(items).items()
+        )
+        if context is not None
+    ]
+    contexts = _resolve_expanded_table_contexts(contexts, artifact_text_resolver, options)
+    return sorted(contexts, key=lambda context: (context.expanded, context.hit_ratio, context.hit_rows), reverse=True)
+
+
+def _table_expansions_from_contexts(contexts: List[TableContext]) -> List[TableExpansion]:
+    return [
+        TableExpansion(
+            mode=context.mode,
+            table_id=context.table_id,
+            title=context.title,
+            row_count=context.row_count,
+            hit_rows=context.hit_rows,
+            hit_blocks=context.hit_blocks,
+            hit_ratio=context.hit_ratio,
+            score=context.score,
+            table=context.table,
+            refs=context.refs,
+        )
+        for context in contexts
+        if context.expanded
+    ]
+
+
+def _group_table_items(items: List[EvidenceItem]) -> Dict[str, List[EvidenceItem]]:
+    grouped: Dict[str, List[EvidenceItem]] = {}
+    for item in items:
+        if not item.table_id or not item.table:
+            continue
+        grouped.setdefault(item.table_id, []).append(item)
+    return grouped
+
+
+def _table_context(
+    table_id: str,
+    items: List[EvidenceItem],
+    options: EvidencePackageOptions,
+) -> Optional[TableContext]:
+    table = _first_table(items)
+    row_count = _positive_int_from_value(table.get("row_count") if table else None, 0)
+    if row_count <= 0:
+        return None
+    hit_rows = _hit_table_rows(items, row_count)
+    if hit_rows <= 0:
+        return None
+    hit_ratio = round(hit_rows / row_count, 6)
+    expanded = hit_ratio >= _table_expand_ratio_threshold(options.table_expand_ratio_threshold)
+    return TableContext(
+        mode=_table_context_mode(row_count, options.max_full_table_rows, expanded),
+        table_id=table_id,
+        title=_optional_string(table.get("title") if table else None),
+        row_count=row_count,
+        hit_rows=hit_rows,
+        hit_blocks=len(items),
+        hit_ratio=hit_ratio,
+        score=max(item.score for item in items),
+        expanded=expanded,
+        table=table,
+        refs=_merged_refs(items),
+        artifact_keys=_merged_artifact_keys(items),
+    )
+
+
+def _first_table(items: List[EvidenceItem]) -> Optional[Dict[str, Any]]:
+    for item in items:
+        if item.table:
+            return dict(item.table)
+    return None
+
+
+def _hit_table_rows(items: List[EvidenceItem], row_count: int) -> int:
+    ranges = [_clamped_row_range(item.row_range, row_count) for item in items if item.row_range]
+    ranges = [row_range for row_range in ranges if row_range is not None]
+    if ranges:
+        return _count_merged_ranges(ranges)
+    if len(items) == 1 and items[0].block_type == "table":
+        return row_count
+    return 0
+
+
+def _clamped_row_range(row_range: Tuple[int, int], row_count: int) -> Optional[Tuple[int, int]]:
+    start, end = row_range
+    start = max(start, 0)
+    end = min(end, row_count)
+    if end <= start:
+        return None
+    return start, end
+
+
+def _count_merged_ranges(ranges: List[Tuple[int, int]]) -> int:
+    total = 0
+    current_start, current_end = sorted(ranges)[0]
+    for start, end in sorted(ranges)[1:]:
+        if start <= current_end:
+            current_end = max(current_end, end)
+            continue
+        total += current_end - current_start
+        current_start, current_end = start, end
+    return total + current_end - current_start
+
+
+def _table_context_mode(row_count: int, max_full_table_rows: int, expanded: bool) -> str:
+    if not expanded:
+        return "matched_table"
+    max_rows = max(int(max_full_table_rows or 0), 0)
+    if max_rows and row_count > max_rows:
+        return "table_reference"
+    return "full_table_candidate"
+
+
+def _resolve_expanded_table_contexts(
+    contexts: List[TableContext],
+    artifact_text_resolver: Optional[ArtifactTextResolver],
+    options: EvidencePackageOptions,
+) -> List[TableContext]:
+    for context in contexts:
+        if not context.expanded or context.mode != "full_table_candidate":
+            continue
+        context.mode = "full_table_inline" if _inline_table_text(context, artifact_text_resolver, options) else "table_reference"
+    return contexts
+
+
+def _package_evidence(
+    all_evidence: List[EvidenceItem],
+    table_contexts: List[TableContext],
+    evidence_limit: int,
+) -> List[EvidenceItem]:
+    contexts_by_table_id = {
+        context.table_id: context
+        for context in table_contexts
+        if context.expanded
+    }
+    promoted_table_ids = set(contexts_by_table_id)
+    grouped_items = _group_table_items(all_evidence)
+    promoted_items = [
+        _table_evidence_item(context, grouped_items.get(context.table_id, []))
+        for context in contexts_by_table_id.values()
+    ]
+    remaining_items = [item for item in all_evidence if item.table_id not in promoted_table_ids]
+    evidence = sorted(promoted_items + remaining_items, key=lambda item: item.score, reverse=True)
+    if evidence_limit:
+        return evidence[:evidence_limit]
+    return []
+
+
+def _table_evidence_item(context: TableContext, items: List[EvidenceItem]) -> EvidenceItem:
+    return EvidenceItem(
+        text=_table_evidence_text(context, items),
+        score=context.score,
+        evidence_type="table",
+        mode=context.mode,
+        block_type="table",
+        table_id=context.table_id,
+        row_range=(0, context.row_count) if context.mode == "full_table_inline" else None,
+        row_count=context.row_count,
+        hit_rows=context.hit_rows,
+        hit_blocks=context.hit_blocks,
+        hit_ratio=context.hit_ratio,
+        merged_block_ids=[item.block_id for item in items if item.block_id],
+        title=context.title,
+        table=context.table,
+        refs=context.refs,
+        artifact_keys=context.artifact_keys,
+    )
+
+
+def _table_evidence_text(context: TableContext, items: List[EvidenceItem]) -> str:
+    text = context.artifact_keys.get("_inline_text")
+    if context.mode == "full_table_inline" and text:
+        return text
+    return "\n\n".join(item.text for item in items if item.text)
+
+
+def _inline_table_text(
+    context: TableContext,
+    artifact_text_resolver: Optional[ArtifactTextResolver],
+    options: EvidencePackageOptions,
+) -> Optional[str]:
+    ref = context.artifact_keys.get("llm_table")
+    if not ref or artifact_text_resolver is None:
+        return None
+    text = artifact_text_resolver(ref)
+    if not text:
+        return None
+    max_chars = max(int(options.max_inline_table_chars or 0), 0)
+    if max_chars and len(text) > max_chars:
+        return None
+    context.artifact_keys["_inline_text"] = text
+    return text
+
+
+def _merged_refs(items: List[EvidenceItem]) -> Dict[str, str]:
+    refs: Dict[str, str] = {}
+    for item in items:
+        for key, value in item.refs.items():
+            refs.setdefault(key, value)
+    return refs
+
+
+def _merged_artifact_keys(items: List[EvidenceItem]) -> Dict[str, str]:
+    refs: Dict[str, str] = {}
+    for item in items:
+        for key, value in item.artifact_keys.items():
+            refs.setdefault(key, value)
+    return refs
+
+
+def _table_expand_ratio_threshold(value: Any) -> float:
+    try:
+        threshold = float(value)
+    except (TypeError, ValueError):
+        return 0.7
+    return min(max(threshold, 0.0), 1.0)
 
 
 def _package_score(
@@ -428,3 +742,21 @@ def _optional_dict(value: Any) -> Optional[Dict[str, Any]]:
     if isinstance(value, dict):
         return dict(value)
     return None
+
+
+def _row_range(value: Any) -> Optional[Tuple[int, int]]:
+    if not isinstance(value, (list, tuple)) or len(value) != 2:
+        return None
+    try:
+        start, end = int(value[0]), int(value[1])
+    except (TypeError, ValueError):
+        return None
+    return start, end
+
+
+def _positive_int_from_value(value: Any, default: int) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return default
+    return parsed if parsed > 0 else default

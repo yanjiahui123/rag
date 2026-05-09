@@ -275,7 +275,7 @@ from rag_service.utils.db_util import (
 from rag_service.utils.his_util.get_user_info import get_user_name, get_user_name_without_exception
 from rag_service.utils.his_util.idata_util import get_dept_employee_list
 from rag_service.utils.his_util.member_infomation_search import search_member_information
-from rag_service.utils.his_util.obs_util import create_signed_url, unify_object_key, upload_file_as_bytes
+from rag_service.utils.his_util.obs_util import create_signed_url, download_file_as_bytes, unify_object_key, upload_file_as_bytes
 from rag_service.utils.his_util.threems_fetch_util import ThreeMSAssetValidator, ThreeMSUriType, get_uri_params, \
     get_threems_source, get_threems_community_doc_list, identify_uri_type
 from rag_service.utils.his_util.threems_personal_blog_fetch_util import get_personal_blogs_by_asset_uri, \
@@ -335,6 +335,9 @@ EVIDENCE_PACKAGE_DEFAULT_TOP_K = 5
 EVIDENCE_PACKAGE_DEFAULT_EVIDENCE_PER_PACKAGE = 6
 EVIDENCE_PACKAGE_DEFAULT_CANDIDATE_MULTIPLIER = 3
 EVIDENCE_PACKAGE_MAX_CANDIDATE_K = 100
+EVIDENCE_PACKAGE_DEFAULT_TABLE_EXPAND_RATIO_THRESHOLD = 0.7
+EVIDENCE_PACKAGE_DEFAULT_MAX_FULL_TABLE_ROWS = 500
+EVIDENCE_PACKAGE_DEFAULT_MAX_INLINE_TABLE_CHARS = 40000
 
 
 def _validate_create_knowledge_base_param(req: CreateKnowledgeBaseReq):
@@ -704,6 +707,7 @@ def get_evidence_packages(
         documents=documents,
         options=options,
         artifact_url_resolver=artifact_url_resolver,
+        artifact_text_resolver=_download_artifact_text,
     )
 
 
@@ -895,6 +899,19 @@ def _get_evidence_package_options(req: QueryRequest) -> EvidencePackageOptions:
         package_top_k=package_top_k,
         max_evidence_per_package=max_evidence_per_package,
         artifact_mode=artifact_mode,
+        enable_table_expansion=_bool_value(getattr(req, "enable_table_expansion", None), True),
+        table_expand_ratio_threshold=_ratio_float(
+            getattr(req, "table_expand_ratio_threshold", None),
+            EVIDENCE_PACKAGE_DEFAULT_TABLE_EXPAND_RATIO_THRESHOLD,
+        ),
+        max_full_table_rows=_non_negative_int(
+            getattr(req, "max_full_table_rows", None),
+            EVIDENCE_PACKAGE_DEFAULT_MAX_FULL_TABLE_ROWS,
+        ),
+        max_inline_table_chars=_non_negative_int(
+            getattr(req, "max_inline_table_chars", None),
+            EVIDENCE_PACKAGE_DEFAULT_MAX_INLINE_TABLE_CHARS,
+        ),
     )
 
 
@@ -915,6 +932,41 @@ def _positive_int(value: Any, default: int) -> int:
     except (TypeError, ValueError):
         return default
     return parsed if parsed > 0 else default
+
+
+def _non_negative_int(value: Any, default: int) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return default
+    return parsed if parsed >= 0 else default
+
+
+def _ratio_float(value: Any, default: float) -> float:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return default
+    if parsed < 0 or parsed > 1:
+        return default
+    return parsed
+
+
+def _bool_value(value: Any, default: bool) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return bool(value)
+
+
+def _download_artifact_text(object_key: str) -> Optional[str]:
+    if not object_key:
+        return None
+    content = download_file_as_bytes(object_key)
+    return content.decode("utf-8")
 
 
 @safe_trace()

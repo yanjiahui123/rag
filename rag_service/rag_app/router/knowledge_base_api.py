@@ -140,6 +140,10 @@ class EvidencePackageRequest(QueryRequest):
     candidate_multiplier: Optional[int] = None
     artifact_mode: Optional[str] = "key"
     include_online_qa: Optional[bool] = False
+    enable_table_expansion: Optional[bool] = True
+    table_expand_ratio_threshold: Optional[float] = None
+    max_full_table_rows: Optional[int] = None
+    max_inline_table_chars: Optional[int] = None
 
 
 @router.post("/create")
