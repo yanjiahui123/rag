@@ -31,6 +31,7 @@ from rag_service.models.generic.models import VectorStoreElasticSearchQueryInfo,
 from rag_service.utils.serdes import deserialize, serialize
 from rag_service.vectorize.embedding import embedding
 from rag_service.vectorstore.base import BaseVectorStore, BaseVectorStoreManager
+from rag_service.vectorstore.parallel_retrieval import query_strategy_requires_embedding, run_ordered_parallel_tasks
 from rag_service.vectorstore.elasticsearch.es_model import (
     EsIndexMapping,
     EsQueryResult,
@@ -798,21 +799,20 @@ class ElasticsearchManager(BaseVectorStoreManager):
         request_id: Optional[str] = None,
         background_tasks: Optional[BackgroundTasks] = None,
     ) -> List[RetrievedDocument]:
-        results: List[EsQueryResult] = []
-        for embedding_model, vector_stores_search_info in embedding_model_to_vector_stores.items():
-            if not vector_stores_search_info.vs_indexes:
-                continue
-            embedding_vector = embedding((query,), embedding_model, True)[0]
-            result = self._vector_store.search(
+        tasks = [
+            self._embedding_model_search_task(
                 query,
-                embedding=embedding_vector,
-                k=k,
-                vector_stores_search_info=vector_stores_search_info,
-                document_score_threshold=document_score_threshold,
-                analyzer=analyzer,
-                query_strategy=query_strategy,
+                k,
+                embedding_model,
+                vector_stores_search_info,
+                document_score_threshold,
+                analyzer,
+                query_strategy,
             )
-            results.extend(result)
+            for embedding_model, vector_stores_search_info in embedding_model_to_vector_stores.items()
+            if vector_stores_search_info.vs_indexes
+        ]
+        results = run_ordered_parallel_tasks(tasks)
         return [
             RetrievedDocument(
                 text=document.general_text,
@@ -830,6 +830,56 @@ class ElasticsearchManager(BaseVectorStoreManager):
             )
             for document in results
         ]
+
+    def _embedding_model_search_task(
+        self,
+        query: str,
+        k: int,
+        embedding_model: EmbeddingModel,
+        vector_stores_search_info: VectorStoreElasticSearchQueryInfo,
+        document_score_threshold: float,
+        analyzer: Analyzer,
+        query_strategy: QueryStrategy,
+    ):
+        return lambda: self._retrieve_by_embedding_model(
+            query,
+            k,
+            embedding_model,
+            vector_stores_search_info,
+            document_score_threshold,
+            analyzer,
+            query_strategy,
+        )
+
+    def _retrieve_by_embedding_model(
+        self,
+        query: str,
+        k: int,
+        embedding_model: EmbeddingModel,
+        vector_stores_search_info: VectorStoreElasticSearchQueryInfo,
+        document_score_threshold: float,
+        analyzer: Analyzer,
+        query_strategy: QueryStrategy,
+    ) -> List[EsQueryResult]:
+        return self._vector_store.search(
+            query,
+            embedding=self._embedding_vector(query, embedding_model, query_strategy),
+            k=k,
+            vector_stores_search_info=vector_stores_search_info,
+            document_score_threshold=document_score_threshold,
+            analyzer=analyzer,
+            query_strategy=query_strategy,
+        )
+
+    def _embedding_vector(
+        self,
+        query: str,
+        embedding_model: EmbeddingModel,
+        query_strategy: QueryStrategy,
+    ) -> List[float]:
+        if not query_strategy_requires_embedding(query_strategy):
+            return []
+        return embedding((query,), embedding_model, True)[0]
 
     def count(self, indexes: List[str]):
         return self._vector_store.count(indexes)
