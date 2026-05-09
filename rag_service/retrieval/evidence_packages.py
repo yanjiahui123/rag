@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
@@ -17,7 +19,13 @@ REF_FIELD_MAP = {
     "display_ref": "display",
     "table_json_ref": "table_json",
     "llm_table_ref": "llm_table",
+    "section_ref": "section",
 }
+
+SECTION_MERGE_MIN_BLOCKS = 2
+SECTION_FULL_EXPAND_RATIO = 0.7
+MAX_INLINE_SECTION_CHARS = 12000
+LOGGER = logging.getLogger(__name__)
 
 
 class EvidencePackageOptions(BaseModel):
@@ -30,7 +38,7 @@ class EvidencePackageOptions(BaseModel):
     max_inline_table_chars: int = 40000
 
 
-class ArtifactSummary(BaseModel):
+class DocumentArtifact(BaseModel):
     artifact_type: str
     artifact_prefix: str
     document_markdown: Optional[str] = None
@@ -46,44 +54,34 @@ class EvidenceItem(BaseModel):
     evidence_type: Optional[str] = None
     mode: Optional[str] = None
     block_id: Optional[str] = None
+    block_index: Optional[int] = None
     block_type: Optional[str] = None
     table_id: Optional[str] = None
+    section_id: Optional[str] = None
     row_range: Optional[Tuple[int, int]] = None
     row_count: Optional[int] = None
     hit_rows: Optional[int] = None
     hit_blocks: Optional[int] = None
     hit_ratio: Optional[float] = None
+    hit_row_ranges: List[List[int]] = Field(default_factory=list)
     merged_block_ids: List[str] = Field(default_factory=list)
     title: Optional[str] = None
     headers: List[str] = Field(default_factory=list)
-    table: Optional[Dict[str, Any]] = None
-    refs: Dict[str, str] = Field(default_factory=dict)
+    table: Optional[Dict[str, Any]] = Field(default=None, exclude=True)
+    refs: Dict[str, str] = Field(default_factory=dict, exclude=True)
     artifact_keys: Dict[str, str] = Field(default_factory=dict, exclude=True)
     es_index: Optional[str] = None
     es_doc_id: Optional[str] = None
 
 
-class TableExpansion(BaseModel):
+class TableArtifact(BaseModel):
     type: str = "table"
     mode: str
     table_id: str
     title: Optional[str] = None
     row_count: int = 0
     hit_rows: int = 0
-    hit_blocks: int = 0
-    hit_ratio: float = 0.0
-    score: float = 0.0
-    table: Optional[Dict[str, Any]] = None
-    refs: Dict[str, str] = Field(default_factory=dict)
-
-
-class TableContext(BaseModel):
-    type: str = "table"
-    mode: str
-    table_id: str
-    title: Optional[str] = None
-    row_count: int = 0
-    hit_rows: int = 0
+    hit_row_ranges: List[List[int]] = Field(default_factory=list)
     hit_blocks: int = 0
     hit_ratio: float = 0.0
     score: float = 0.0
@@ -91,6 +89,25 @@ class TableContext(BaseModel):
     table: Optional[Dict[str, Any]] = None
     refs: Dict[str, str] = Field(default_factory=dict)
     artifact_keys: Dict[str, str] = Field(default_factory=dict, exclude=True)
+
+
+class DocumentSectionArtifact(BaseModel):
+    type: str = "section"
+    mode: str = "merged_section"
+    section_id: str
+    title: Optional[str] = None
+    headers: List[str] = Field(default_factory=list)
+    hit_blocks: int = 0
+    score: float = 0.0
+    merged_block_ids: List[str] = Field(default_factory=list)
+    refs: Dict[str, str] = Field(default_factory=dict)
+    artifact_keys: Dict[str, str] = Field(default_factory=dict, exclude=True)
+
+
+class PackageArtifacts(BaseModel):
+    document: Optional[DocumentArtifact] = None
+    sections: List[DocumentSectionArtifact] = Field(default_factory=list)
+    tables: List[TableArtifact] = Field(default_factory=list)
 
 
 class DocumentEvidencePackage(BaseModel):
@@ -101,10 +118,8 @@ class DocumentEvidencePackage(BaseModel):
     title: Optional[str]
     score: float
     evidence_count: int
-    artifact_summary: Optional[ArtifactSummary]
+    artifacts: PackageArtifacts
     evidence: List[EvidenceItem] = Field(default_factory=list)
-    expansions: List[TableExpansion] = Field(default_factory=list)
-    table_contexts: List[TableContext] = Field(default_factory=list)
 
 
 class EvidencePackageResponse(BaseModel):
@@ -227,7 +242,7 @@ def build_evidence_packages(
                 doc_id=_optional_string(metadata.get("doc_id")),
                 source=source,
                 title=_document_title(document, metadata),
-                artifact_summary=_artifact_summary(metadata, options, artifact_url_resolver),
+                document_artifact=_document_artifact(metadata, options, artifact_url_resolver),
             )
         groups[group_key].add(_evidence_item(document, metadata, options, artifact_url_resolver))
 
@@ -240,6 +255,11 @@ def build_evidence_packages(
         packages = packages[:package_limit]
     else:
         packages = []
+    LOGGER.debug(
+        "evidence.package_build candidate_count=%s package_count=%s",
+        len(document_list),
+        len(packages),
+    )
     return EvidencePackageResponse(query=query, rewrite_query=rewrite_query, packages=packages)
 
 
@@ -338,15 +358,15 @@ class _PackageAccumulator:
         doc_id: Optional[str],
         source: str,
         title: Optional[str],
-        artifact_summary: Optional[ArtifactSummary],
+        document_artifact: Optional[DocumentArtifact],
     ):
         self.kb_sn = kb_sn
         self.asset_name = asset_name
         self.doc_id = doc_id
         self.source = source
         self.title = title
-        self.artifact_summary = artifact_summary
-        self._items_by_key: Dict[Tuple[str, str], EvidenceItem] = {}
+        self.document_artifact = document_artifact
+        self._items_by_key: Dict[Tuple[str, ...], EvidenceItem] = {}
 
     def add(self, item: EvidenceItem) -> None:
         key = _evidence_key(item)
@@ -361,10 +381,10 @@ class _PackageAccumulator:
         artifact_text_resolver: Optional[ArtifactTextResolver],
     ) -> DocumentEvidencePackage:
         all_evidence = sorted(self._items_by_key.values(), key=lambda item: item.score, reverse=True)
-        table_contexts = _table_contexts(all_evidence, options, artifact_text_resolver)
-        expansions = _table_expansions_from_contexts(table_contexts)
-        evidence = _package_evidence(all_evidence, table_contexts, evidence_limit)
-        score = _package_score(evidence, len(self._items_by_key), self.artifact_summary)
+        table_artifacts = _table_artifacts(all_evidence, options, artifact_text_resolver)
+        section_artifacts = _section_artifacts(all_evidence, self.document_artifact, artifact_text_resolver)
+        evidence = _package_evidence(all_evidence, table_artifacts, section_artifacts, evidence_limit)
+        score = _package_score(evidence, len(self._items_by_key), self.document_artifact)
         return DocumentEvidencePackage(
             kb_sn=self.kb_sn,
             asset_name=self.asset_name,
@@ -373,10 +393,8 @@ class _PackageAccumulator:
             title=self.title,
             score=score,
             evidence_count=len(self._items_by_key),
-            artifact_summary=self.artifact_summary,
+            artifacts=PackageArtifacts(document=self.document_artifact, sections=section_artifacts, tables=table_artifacts),
             evidence=evidence,
-            expansions=expansions,
-            table_contexts=table_contexts,
         )
 
 
@@ -390,8 +408,10 @@ def _evidence_item(
         text=getattr(document, "text", "") or "",
         score=float(getattr(document, "score", 0.0) or 0.0),
         block_id=_optional_string(metadata.get("block_id")),
+        block_index=_optional_int(metadata.get("block_index")),
         block_type=_optional_string(metadata.get("block_type")),
         table_id=_optional_string(metadata.get("table_id")),
+        section_id=_optional_string(metadata.get("section_id")),
         row_range=_row_range(metadata.get("row_range")),
         title=_optional_string(metadata.get("title")),
         headers=list(metadata.get("headers") or []),
@@ -403,16 +423,16 @@ def _evidence_item(
     )
 
 
-def _artifact_summary(
+def _document_artifact(
     metadata: Dict[str, Any],
     options: EvidencePackageOptions,
     artifact_url_resolver: Optional[ArtifactUrlResolver],
-) -> Optional[ArtifactSummary]:
+) -> Optional[DocumentArtifact]:
     for metadata_key in ARTIFACT_METADATA_KEYS:
         raw = metadata.get(metadata_key)
         if not isinstance(raw, dict) or not raw.get("artifact_prefix"):
             continue
-        return ArtifactSummary(
+        return DocumentArtifact(
             artifact_type=metadata_key,
             artifact_prefix=raw["artifact_prefix"],
             document_markdown=_resolve_artifact_ref(raw.get("document_markdown_key"), options, artifact_url_resolver),
@@ -462,81 +482,342 @@ def _document_group_key(metadata: Dict[str, Any], source: str) -> Tuple[Optional
     return metadata.get("kb_sn"), metadata.get("asset_name"), doc_identifier
 
 
-def _evidence_key(item: EvidenceItem) -> Tuple[str, str]:
-    if item.block_id:
+def _evidence_key(item: EvidenceItem) -> Tuple[str, ...]:
+    if item.table_id and item.block_id:
         return "block", item.block_id
     if item.table_id:
         return "table", item.table_id
+    if item.block_id:
+        return "block_text", item.block_id, item.text
     return "text", item.text
 
 
-def _table_contexts(
+def _section_artifacts(
+    items: List[EvidenceItem],
+    document_artifact: Optional[DocumentArtifact],
+    artifact_text_resolver: Optional[ArtifactTextResolver],
+) -> List[DocumentSectionArtifact]:
+    manifest = _document_manifest(document_artifact, artifact_text_resolver)
+    artifacts = [
+        artifact
+        for section_id, section_items in _group_section_items(items).items()
+        for artifact in [_section_artifact(section_id, section_items, manifest, artifact_text_resolver)]
+        if artifact is not None
+    ]
+    return sorted(artifacts, key=lambda artifact: (artifact.hit_blocks, artifact.score), reverse=True)
+
+
+def _document_manifest(
+    document_artifact: Optional[DocumentArtifact],
+    artifact_text_resolver: Optional[ArtifactTextResolver],
+) -> Dict[str, Any]:
+    manifest_ref = _document_manifest_ref(document_artifact)
+    if not manifest_ref or artifact_text_resolver is None:
+        return {}
+    manifest_text = artifact_text_resolver(manifest_ref)
+    if not manifest_text:
+        return {}
+    try:
+        manifest = json.loads(manifest_text)
+    except Exception:
+        LOGGER.debug("evidence.manifest_load_failed manifest_ref=%s", manifest_ref)
+        return {}
+    return manifest if isinstance(manifest, dict) else {}
+
+
+def _document_manifest_ref(document_artifact: Optional[DocumentArtifact]) -> Optional[str]:
+    if document_artifact is None:
+        return None
+    return _optional_string(document_artifact.raw.get("manifest_key")) or document_artifact.manifest
+
+
+def _group_section_items(items: List[EvidenceItem]) -> Dict[str, List[EvidenceItem]]:
+    grouped: Dict[str, List[EvidenceItem]] = {}
+    for item in items:
+        if item.table_id:
+            continue
+        section_id = _item_section_id(item)
+        if not section_id:
+            continue
+        grouped.setdefault(section_id, []).append(item)
+    return grouped
+
+
+def _section_artifact(
+    section_id: str,
+    items: List[EvidenceItem],
+    manifest: Dict[str, Any],
+    artifact_text_resolver: Optional[ArtifactTextResolver],
+) -> Optional[DocumentSectionArtifact]:
+    ordered_items = _ordered_section_items(items)
+    text = _merged_section_text(ordered_items)
+    if len(ordered_items) < SECTION_MERGE_MIN_BLOCKS or not _within_section_budget(text):
+        return None
+    manifest_section = _section_manifest(section_id, ordered_items, manifest)
+    total_blocks = len(_manifest_block_ids(manifest_section))
+    coverage = _section_coverage(ordered_items, total_blocks)
+    artifact_keys = _merged_artifact_keys(ordered_items)
+    refs = _merged_refs(ordered_items)
+    _apply_manifest_section_ref(manifest_section, artifact_keys, refs)
+    inline_text = _full_section_text(artifact_keys, manifest_section, coverage, artifact_text_resolver)
+    mode = "full_section" if inline_text else "merged_section"
+    if inline_text:
+        artifact_keys["_inline_text"] = inline_text
+    _log_section_trace(section_id, ordered_items, total_blocks, coverage, mode)
+    return DocumentSectionArtifact(
+        mode=mode,
+        section_id=section_id,
+        title=_section_title(ordered_items),
+        headers=_section_headers(ordered_items),
+        hit_blocks=len(ordered_items),
+        score=max(item.score for item in ordered_items),
+        merged_block_ids=_unique_block_ids(ordered_items),
+        refs=refs,
+        artifact_keys=artifact_keys,
+    )
+
+
+def _section_manifest(
+    section_id: str,
+    items: List[EvidenceItem],
+    manifest: Dict[str, Any],
+) -> Optional[Dict[str, Any]]:
+    sections = manifest.get("sections")
+    if not isinstance(sections, list):
+        return None
+    exact = _section_manifest_by_id(section_id, items, sections)
+    if exact:
+        return exact
+    return _section_manifest_by_headers(_section_headers(items), sections)
+
+
+def _section_manifest_by_id(
+    section_id: str,
+    items: List[EvidenceItem],
+    sections: List[Any],
+) -> Optional[Dict[str, Any]]:
+    section_ids = {section_id}
+    section_ids.update(item.section_id for item in items if item.section_id)
+    for section in sections:
+        if isinstance(section, dict) and str(section.get("section_id")) in section_ids:
+            return section
+    return None
+
+
+def _section_manifest_by_headers(headers: List[str], sections: List[Any]) -> Optional[Dict[str, Any]]:
+    if not headers:
+        return None
+    for section in sections:
+        if isinstance(section, dict) and _clean_headers(section.get("headers") or []) == headers:
+            return section
+    return None
+
+
+def _manifest_block_ids(manifest_section: Optional[Dict[str, Any]]) -> List[str]:
+    if not manifest_section:
+        return []
+    block_ids = manifest_section.get("block_ids")
+    if not isinstance(block_ids, list):
+        return []
+    return [str(block_id) for block_id in block_ids if block_id]
+
+
+def _section_coverage(items: List[EvidenceItem], total_blocks: int) -> Optional[float]:
+    if total_blocks <= 0:
+        return None
+    return len(_unique_block_ids(items)) / total_blocks
+
+
+def _apply_manifest_section_ref(
+    manifest_section: Optional[Dict[str, Any]],
+    artifact_keys: Dict[str, str],
+    refs: Dict[str, str],
+) -> None:
+    section_ref = _manifest_section_ref(manifest_section)
+    if not section_ref:
+        return
+    artifact_keys.setdefault("section", section_ref)
+    refs.setdefault("section", section_ref)
+
+
+def _manifest_section_ref(manifest_section: Optional[Dict[str, Any]]) -> Optional[str]:
+    if not manifest_section:
+        return None
+    return _optional_string(manifest_section.get("section_ref"))
+
+
+def _full_section_text(
+    artifact_keys: Dict[str, str],
+    manifest_section: Optional[Dict[str, Any]],
+    coverage: Optional[float],
+    artifact_text_resolver: Optional[ArtifactTextResolver],
+) -> Optional[str]:
+    if not _should_use_full_section(artifact_keys, manifest_section, coverage):
+        return None
+    return _inline_section_text(artifact_keys, artifact_text_resolver)
+
+
+def _should_use_full_section(
+    artifact_keys: Dict[str, str],
+    manifest_section: Optional[Dict[str, Any]],
+    coverage: Optional[float],
+) -> bool:
+    if not artifact_keys.get("section"):
+        return False
+    if manifest_section:
+        return coverage is not None and coverage >= SECTION_FULL_EXPAND_RATIO
+    return True
+
+
+def _log_section_trace(
+    section_id: str,
+    items: List[EvidenceItem],
+    total_blocks: int,
+    coverage: Optional[float],
+    mode: str,
+) -> None:
+    coverage_text = f"{coverage:.6f}" if coverage is not None else "unknown"
+    LOGGER.debug(
+        "evidence.section section_id=%s hit_blocks=%s total_blocks=%s coverage=%s mode=%s",
+        section_id,
+        len(_unique_block_ids(items)) or len(items),
+        total_blocks,
+        coverage_text,
+        mode,
+    )
+
+
+def _item_section_id(item: EvidenceItem) -> Optional[str]:
+    if item.section_id:
+        return item.section_id
+    headers = _clean_headers(item.headers)
+    if headers:
+        return " / ".join(headers)
+    return item.title
+
+
+def _ordered_section_items(items: List[EvidenceItem]) -> List[EvidenceItem]:
+    return sorted(items, key=lambda item: (_block_order(item), item.block_id or "", -item.score))
+
+
+def _merged_section_text(items: List[EvidenceItem]) -> str:
+    return "\n\n".join(item.text for item in items if item.text)
+
+
+def _within_section_budget(text: str) -> bool:
+    return len(text) <= MAX_INLINE_SECTION_CHARS
+
+
+def _inline_section_text(
+    artifact_keys: Dict[str, str],
+    artifact_text_resolver: Optional[ArtifactTextResolver],
+) -> Optional[str]:
+    ref = artifact_keys.get("section")
+    if not ref or artifact_text_resolver is None:
+        return None
+    text = artifact_text_resolver(ref)
+    if not text or len(text) > MAX_INLINE_SECTION_CHARS:
+        return None
+    return text
+
+
+def _section_title(items: List[EvidenceItem]) -> Optional[str]:
+    headers = _section_headers(items)
+    if headers:
+        return headers[-1]
+    for item in items:
+        if item.title:
+            return item.title
+    return None
+
+
+def _section_headers(items: List[EvidenceItem]) -> List[str]:
+    for item in items:
+        headers = _clean_headers(item.headers)
+        if headers:
+            return headers
+    return []
+
+
+def _clean_headers(headers: List[Any]) -> List[str]:
+    return [str(header) for header in headers if header]
+
+
+def _unique_block_ids(items: List[EvidenceItem]) -> List[str]:
+    block_ids = []
+    seen = set()
+    for item in items:
+        if not item.block_id or item.block_id in seen:
+            continue
+        seen.add(item.block_id)
+        block_ids.append(item.block_id)
+    return block_ids
+
+
+def _block_order(item: EvidenceItem) -> int:
+    if item.block_index is not None:
+        return item.block_index
+    parsed_order = _trailing_int(item.block_id)
+    if parsed_order is not None:
+        return parsed_order
+    return 1_000_000
+
+
+def _trailing_int(value: Optional[str]) -> Optional[int]:
+    if not value:
+        return None
+    suffix = value.rsplit("_", 1)[-1]
+    return int(suffix) if suffix.isdigit() else None
+
+
+def _table_artifacts(
     items: List[EvidenceItem],
     options: EvidencePackageOptions,
     artifact_text_resolver: Optional[ArtifactTextResolver],
-) -> List[TableContext]:
+) -> List[TableArtifact]:
     if not options.enable_table_expansion:
         return []
-    contexts = [
-        context
-        for context in (
-            _table_context(table_id, table_items, options)
+    artifacts = [
+        artifact
+        for artifact in (
+            _table_artifact(table_id, table_items, options)
             for table_id, table_items in _group_table_items(items).items()
         )
-        if context is not None
+        if artifact is not None
     ]
-    contexts = _resolve_expanded_table_contexts(contexts, artifact_text_resolver, options)
-    return sorted(contexts, key=lambda context: (context.expanded, context.hit_ratio, context.hit_rows), reverse=True)
-
-
-def _table_expansions_from_contexts(contexts: List[TableContext]) -> List[TableExpansion]:
-    return [
-        TableExpansion(
-            mode=context.mode,
-            table_id=context.table_id,
-            title=context.title,
-            row_count=context.row_count,
-            hit_rows=context.hit_rows,
-            hit_blocks=context.hit_blocks,
-            hit_ratio=context.hit_ratio,
-            score=context.score,
-            table=context.table,
-            refs=context.refs,
-        )
-        for context in contexts
-        if context.expanded
-    ]
+    artifacts = _resolve_expanded_table_artifacts(artifacts, artifact_text_resolver, options)
+    return sorted(artifacts, key=lambda artifact: (artifact.expanded, artifact.hit_ratio, artifact.hit_rows), reverse=True)
 
 
 def _group_table_items(items: List[EvidenceItem]) -> Dict[str, List[EvidenceItem]]:
     grouped: Dict[str, List[EvidenceItem]] = {}
     for item in items:
-        if not item.table_id or not item.table:
+        if not item.table_id:
             continue
         grouped.setdefault(item.table_id, []).append(item)
     return grouped
 
 
-def _table_context(
+def _table_artifact(
     table_id: str,
     items: List[EvidenceItem],
     options: EvidencePackageOptions,
-) -> Optional[TableContext]:
+) -> Optional[TableArtifact]:
     table = _first_table(items)
     row_count = _positive_int_from_value(table.get("row_count") if table else None, 0)
-    if row_count <= 0:
-        return None
-    hit_rows = _hit_table_rows(items, row_count)
-    if hit_rows <= 0:
-        return None
-    hit_ratio = round(hit_rows / row_count, 6)
+    hit_row_ranges = _hit_table_row_ranges(items, row_count) if row_count > 0 else []
+    hit_rows = _count_row_ranges(hit_row_ranges)
+    hit_ratio = round(hit_rows / row_count, 6) if row_count > 0 else 0.0
     expanded = hit_ratio >= _table_expand_ratio_threshold(options.table_expand_ratio_threshold)
-    return TableContext(
-        mode=_table_context_mode(row_count, options.max_full_table_rows, expanded),
+    mode = _table_artifact_mode(row_count, options.max_full_table_rows, expanded)
+    _log_table_trace(table_id, items, row_count, hit_rows, hit_ratio, mode)
+    return TableArtifact(
+        mode=mode,
         table_id=table_id,
         title=_optional_string(table.get("title") if table else None),
         row_count=row_count,
         hit_rows=hit_rows,
+        hit_row_ranges=hit_row_ranges,
         hit_blocks=len(items),
         hit_ratio=hit_ratio,
         score=max(item.score for item in items),
@@ -547,6 +828,25 @@ def _table_context(
     )
 
 
+def _log_table_trace(
+    table_id: str,
+    items: List[EvidenceItem],
+    row_count: int,
+    hit_rows: int,
+    hit_ratio: float,
+    mode: str,
+) -> None:
+    LOGGER.debug(
+        "evidence.table table_id=%s hit_blocks=%s hit_rows=%s row_count=%s hit_ratio=%.6f mode=%s",
+        table_id,
+        len(items),
+        hit_rows,
+        row_count,
+        hit_ratio,
+        mode,
+    )
+
+
 def _first_table(items: List[EvidenceItem]) -> Optional[Dict[str, Any]]:
     for item in items:
         if item.table:
@@ -554,14 +854,14 @@ def _first_table(items: List[EvidenceItem]) -> Optional[Dict[str, Any]]:
     return None
 
 
-def _hit_table_rows(items: List[EvidenceItem], row_count: int) -> int:
+def _hit_table_row_ranges(items: List[EvidenceItem], row_count: int) -> List[List[int]]:
     ranges = [_clamped_row_range(item.row_range, row_count) for item in items if item.row_range]
     ranges = [row_range for row_range in ranges if row_range is not None]
     if ranges:
-        return _count_merged_ranges(ranges)
+        return _merge_row_ranges(ranges)
     if len(items) == 1 and items[0].block_type == "table":
-        return row_count
-    return 0
+        return [[0, row_count]]
+    return []
 
 
 def _clamped_row_range(row_range: Tuple[int, int], row_count: int) -> Optional[Tuple[int, int]]:
@@ -573,19 +873,21 @@ def _clamped_row_range(row_range: Tuple[int, int], row_count: int) -> Optional[T
     return start, end
 
 
-def _count_merged_ranges(ranges: List[Tuple[int, int]]) -> int:
-    total = 0
-    current_start, current_end = sorted(ranges)[0]
-    for start, end in sorted(ranges)[1:]:
-        if start <= current_end:
-            current_end = max(current_end, end)
+def _merge_row_ranges(ranges: List[Tuple[int, int]]) -> List[List[int]]:
+    merged: List[List[int]] = []
+    for start, end in sorted(ranges):
+        if merged and start <= merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], end)
             continue
-        total += current_end - current_start
-        current_start, current_end = start, end
-    return total + current_end - current_start
+        merged.append([start, end])
+    return merged
 
 
-def _table_context_mode(row_count: int, max_full_table_rows: int, expanded: bool) -> str:
+def _count_row_ranges(ranges: List[List[int]]) -> int:
+    return sum(end - start for start, end in ranges)
+
+
+def _table_artifact_mode(row_count: int, max_full_table_rows: int, expanded: bool) -> str:
     if not expanded:
         return "matched_table"
     max_rows = max(int(max_full_table_rows or 0), 0)
@@ -594,75 +896,109 @@ def _table_context_mode(row_count: int, max_full_table_rows: int, expanded: bool
     return "full_table_candidate"
 
 
-def _resolve_expanded_table_contexts(
-    contexts: List[TableContext],
+def _resolve_expanded_table_artifacts(
+    artifacts: List[TableArtifact],
     artifact_text_resolver: Optional[ArtifactTextResolver],
     options: EvidencePackageOptions,
-) -> List[TableContext]:
-    for context in contexts:
-        if not context.expanded or context.mode != "full_table_candidate":
+) -> List[TableArtifact]:
+    for artifact in artifacts:
+        if not artifact.expanded or artifact.mode != "full_table_candidate":
             continue
-        context.mode = "full_table_inline" if _inline_table_text(context, artifact_text_resolver, options) else "table_reference"
-    return contexts
+        artifact.mode = "full_table_inline" if _inline_table_text(artifact, artifact_text_resolver, options) else "table_reference"
+    return artifacts
 
 
 def _package_evidence(
     all_evidence: List[EvidenceItem],
-    table_contexts: List[TableContext],
+    table_artifacts: List[TableArtifact],
+    section_artifacts: List[DocumentSectionArtifact],
     evidence_limit: int,
 ) -> List[EvidenceItem]:
-    contexts_by_table_id = {
-        context.table_id: context
-        for context in table_contexts
-        if context.expanded
+    artifacts_by_table_id = {
+        artifact.table_id: artifact
+        for artifact in table_artifacts
+        if artifact.expanded
     }
-    promoted_table_ids = set(contexts_by_table_id)
-    grouped_items = _group_table_items(all_evidence)
-    promoted_items = [
-        _table_evidence_item(context, grouped_items.get(context.table_id, []))
-        for context in contexts_by_table_id.values()
+    promoted_table_ids = set(artifacts_by_table_id)
+    table_items = _group_table_items(all_evidence)
+    promoted_tables = [
+        _table_evidence_item(artifact, table_items.get(artifact.table_id, []))
+        for artifact in artifacts_by_table_id.values()
     ]
-    remaining_items = [item for item in all_evidence if item.table_id not in promoted_table_ids]
-    evidence = sorted(promoted_items + remaining_items, key=lambda item: item.score, reverse=True)
+    section_items = _group_section_items(all_evidence)
+    artifacts_by_section_id = {artifact.section_id: artifact for artifact in section_artifacts}
+    promoted_sections = [
+        _section_evidence_item(artifact, section_items.get(artifact.section_id, []))
+        for artifact in artifacts_by_section_id.values()
+    ]
+    remaining_items = [
+        item
+        for item in all_evidence
+        if item.table_id not in promoted_table_ids and _item_section_id(item) not in artifacts_by_section_id
+    ]
+    evidence = sorted(promoted_tables + promoted_sections + remaining_items, key=lambda item: item.score, reverse=True)
     if evidence_limit:
         return evidence[:evidence_limit]
     return []
 
 
-def _table_evidence_item(context: TableContext, items: List[EvidenceItem]) -> EvidenceItem:
+def _section_evidence_item(artifact: DocumentSectionArtifact, items: List[EvidenceItem]) -> EvidenceItem:
+    ordered_items = _ordered_section_items(items)
     return EvidenceItem(
-        text=_table_evidence_text(context, items),
-        score=context.score,
-        evidence_type="table",
-        mode=context.mode,
-        block_type="table",
-        table_id=context.table_id,
-        row_range=(0, context.row_count) if context.mode == "full_table_inline" else None,
-        row_count=context.row_count,
-        hit_rows=context.hit_rows,
-        hit_blocks=context.hit_blocks,
-        hit_ratio=context.hit_ratio,
-        merged_block_ids=[item.block_id for item in items if item.block_id],
-        title=context.title,
-        table=context.table,
-        refs=context.refs,
-        artifact_keys=context.artifact_keys,
+        text=_section_evidence_text(artifact, ordered_items),
+        score=artifact.score,
+        evidence_type="section",
+        mode=artifact.mode,
+        block_type="text",
+        section_id=artifact.section_id,
+        hit_blocks=artifact.hit_blocks,
+        merged_block_ids=artifact.merged_block_ids,
+        title=artifact.title,
+        headers=artifact.headers,
+        refs=artifact.refs,
+        artifact_keys=artifact.artifact_keys,
     )
 
 
-def _table_evidence_text(context: TableContext, items: List[EvidenceItem]) -> str:
-    text = context.artifact_keys.get("_inline_text")
-    if context.mode == "full_table_inline" and text:
+def _section_evidence_text(artifact: DocumentSectionArtifact, items: List[EvidenceItem]) -> str:
+    return artifact.artifact_keys.get("_inline_text") or _merged_section_text(items)
+
+
+def _table_evidence_item(artifact: TableArtifact, items: List[EvidenceItem]) -> EvidenceItem:
+    return EvidenceItem(
+        text=_table_evidence_text(artifact, items),
+        score=artifact.score,
+        evidence_type="table",
+        mode=artifact.mode,
+        block_type="table",
+        table_id=artifact.table_id,
+        row_range=(0, artifact.row_count) if artifact.mode == "full_table_inline" else None,
+        row_count=artifact.row_count,
+        hit_rows=artifact.hit_rows,
+        hit_blocks=artifact.hit_blocks,
+        hit_ratio=artifact.hit_ratio,
+        hit_row_ranges=artifact.hit_row_ranges,
+        merged_block_ids=[item.block_id for item in items if item.block_id],
+        title=artifact.title,
+        table=artifact.table,
+        refs=artifact.refs,
+        artifact_keys=artifact.artifact_keys,
+    )
+
+
+def _table_evidence_text(artifact: TableArtifact, items: List[EvidenceItem]) -> str:
+    text = artifact.artifact_keys.get("_inline_text")
+    if artifact.mode == "full_table_inline" and text:
         return text
     return "\n\n".join(item.text for item in items if item.text)
 
 
 def _inline_table_text(
-    context: TableContext,
+    artifact: TableArtifact,
     artifact_text_resolver: Optional[ArtifactTextResolver],
     options: EvidencePackageOptions,
 ) -> Optional[str]:
-    ref = context.artifact_keys.get("llm_table")
+    ref = artifact.artifact_keys.get("llm_table")
     if not ref or artifact_text_resolver is None:
         return None
     text = artifact_text_resolver(ref)
@@ -671,7 +1007,7 @@ def _inline_table_text(
     max_chars = max(int(options.max_inline_table_chars or 0), 0)
     if max_chars and len(text) > max_chars:
         return None
-    context.artifact_keys["_inline_text"] = text
+    artifact.artifact_keys["_inline_text"] = text
     return text
 
 
@@ -702,14 +1038,14 @@ def _table_expand_ratio_threshold(value: Any) -> float:
 def _package_score(
     evidence: List[EvidenceItem],
     total_evidence_count: int,
-    artifact_summary: Optional[ArtifactSummary],
+    document_artifact: Optional[DocumentArtifact],
 ) -> float:
     if not evidence:
         return 0.0
     max_score = max(item.score for item in evidence)
     average_score = sum(item.score for item in evidence) / len(evidence)
     evidence_signal = min(total_evidence_count, 10) / 10
-    artifact_signal = 1.0 if artifact_summary else 0.0
+    artifact_signal = 1.0 if document_artifact else 0.0
     return round(max_score * 0.7 + average_score * 0.2 + evidence_signal * 0.07 + artifact_signal * 0.03, 6)
 
 
@@ -736,6 +1072,13 @@ def _optional_string(value: Any) -> Optional[str]:
     if value is None:
         return None
     return str(value)
+
+
+def _optional_int(value: Any) -> Optional[int]:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _optional_dict(value: Any) -> Optional[Dict[str, Any]]:

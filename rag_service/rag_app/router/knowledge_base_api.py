@@ -135,15 +135,7 @@ logger = get_logger(module=Module.APP)
 
 
 class EvidencePackageRequest(QueryRequest):
-    package_top_k: Optional[int] = None
-    max_evidence_per_package: Optional[int] = None
-    candidate_multiplier: Optional[int] = None
-    artifact_mode: Optional[str] = "key"
-    include_online_qa: Optional[bool] = False
-    enable_table_expansion: Optional[bool] = True
-    table_expand_ratio_threshold: Optional[float] = None
-    max_full_table_rows: Optional[int] = None
-    max_inline_table_chars: Optional[int] = None
+    pass
 
 
 @router.post("/create")

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 STRUCTURED_DOCX_ARTIFACTS_KEY = "_structured_docx_artifacts"
 STRUCTURED_DOCX_METADATA_KEY = "structured_docx"
@@ -211,6 +211,7 @@ def _persist_structured_artifacts(
     if not artifacts:
         return {}
     document_key = _upload_document_markdown(prefix, artifacts, upload_content)
+    _upload_sections(prefix, parsed_document, upload_content)
     table_refs = _upload_table_artifacts(prefix, artifacts.get("tables", []), upload_content)
     _apply_table_refs(parsed_document, table_refs)
     manifest_key = _upload_manifest(prefix, parsed_document, upload_content)
@@ -245,6 +246,61 @@ def _upload_table_artifacts(prefix: str, tables, upload_content) -> Dict[str, Di
     return refs
 
 
+def _upload_sections(prefix: str, parsed_document: Any, upload_content) -> None:
+    for section in _sections_from_blocks(getattr(parsed_document, "blocks", [])):
+        section_ref = prefix + "sections/" + _safe_ref_name(section["section_id"]) + ".md"
+        for block in section["blocks"]:
+            block.metadata["section_id"] = section["section_id"]
+            block.metadata["section_ref"] = section_ref
+        upload_content(section_ref, _section_markdown(section["blocks"]))
+
+
+def _sections_from_blocks(blocks) -> List[Dict[str, Any]]:
+    sections = []
+    section_by_key: Dict[str, Dict[str, Any]] = {}
+    for block in blocks:
+        key = _section_key(block)
+        if key not in section_by_key:
+            section = _new_section(block, len(sections) + 1)
+            section_by_key[key] = section
+            sections.append(section)
+        section_by_key[key]["blocks"].append(block)
+    return sections
+
+
+def _new_section(block: Any, index: int) -> Dict[str, Any]:
+    return {
+        "section_id": block.metadata.get("section_id") or f"section_{index:03d}",
+        "title": _section_title(block),
+        "headers": list(block.metadata.get("headers") or []),
+        "blocks": [],
+    }
+
+
+def _section_key(block: Any) -> str:
+    if block.metadata.get("section_id"):
+        return str(block.metadata["section_id"])
+    headers = block.metadata.get("headers") or []
+    if headers:
+        return " / ".join(str(header) for header in headers if header)
+    return str(block.metadata.get("title") or "document")
+
+
+def _section_title(block: Any) -> str:
+    headers = block.metadata.get("headers") or []
+    if headers:
+        return str(headers[-1])
+    return str(block.metadata.get("title") or "")
+
+
+def _section_markdown(blocks) -> str:
+    return "\n\n".join(block.text for block in blocks if block.text).strip()
+
+
+def _safe_ref_name(value: str) -> str:
+    return re.sub(r"[^A-Za-z0-9_.-]+", "_", value).strip("_") or "section"
+
+
 def _table_refs(table_prefix: str) -> Dict[str, str]:
     return {
         "display_ref": table_prefix + ".html",
@@ -268,13 +324,40 @@ def _manifest_from_blocks(blocks) -> Dict[str, Any]:
                 "type": block.metadata.get("block_type", "text"),
                 "title": block.metadata.get("title", ""),
                 "headers": block.metadata.get("headers", []),
+                "section_id": block.metadata.get("section_id"),
+                "section_ref": block.metadata.get("section_ref"),
                 "table_id": block.metadata.get("table_id"),
                 "display_ref": block.metadata.get("display_ref"),
                 "table_json_ref": block.metadata.get("table_json_ref"),
                 "llm_table_ref": block.metadata.get("llm_table_ref"),
             }
             for block in blocks
-        ]
+        ],
+        "sections": _manifest_sections(blocks),
+    }
+
+
+def _manifest_sections(blocks) -> List[Dict[str, Any]]:
+    sections = []
+    seen = set()
+    for block in blocks:
+        section_id = block.metadata.get("section_id")
+        if not section_id or section_id in seen:
+            continue
+        seen.add(section_id)
+        sections.append(_manifest_section(block, blocks))
+    return sections
+
+
+def _manifest_section(first_block: Any, blocks) -> Dict[str, Any]:
+    section_id = first_block.metadata.get("section_id")
+    section_blocks = [block for block in blocks if block.metadata.get("section_id") == section_id]
+    return {
+        "section_id": section_id,
+        "title": _section_title(first_block),
+        "headers": first_block.metadata.get("headers", []),
+        "block_ids": [block.metadata.get("block_id") for block in section_blocks if block.metadata.get("block_id")],
+        "section_ref": first_block.metadata.get("section_ref"),
     }
 
 

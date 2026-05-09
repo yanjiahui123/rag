@@ -275,7 +275,7 @@ from rag_service.utils.db_util import (
 from rag_service.utils.his_util.get_user_info import get_user_name, get_user_name_without_exception
 from rag_service.utils.his_util.idata_util import get_dept_employee_list
 from rag_service.utils.his_util.member_infomation_search import search_member_information
-from rag_service.utils.his_util.obs_util import create_signed_url, download_file_as_bytes, unify_object_key, upload_file_as_bytes
+from rag_service.utils.his_util.obs_util import download_file_as_bytes, unify_object_key, upload_file_as_bytes
 from rag_service.utils.his_util.threems_fetch_util import ThreeMSAssetValidator, ThreeMSUriType, get_uri_params, \
     get_threems_source, get_threems_community_doc_list, identify_uri_type
 from rag_service.utils.his_util.threems_personal_blog_fetch_util import get_personal_blogs_by_asset_uri, \
@@ -668,14 +668,48 @@ def get_evidence_packages(
     original_question = req.question
     kb_sn_list = req.kb_sn_list if req.kb_sn_list else [req.kb_sn]
     knowledge_base_list = permission_judge(session, kb_sn_list, req.uid)
-    options = _get_evidence_package_options(req)
-    candidate_top_k = expanded_candidate_top_k(
+    options = _get_evidence_package_options()
+    candidate_top_k = _evidence_candidate_top_k(options)
+    _log_evidence_retrieve_start(req, knowledge_base_list, candidate_top_k)
+    rewrite_question = _rewrite_evidence_question(req, background_tasks, session)
+    documents = _retrieve_evidence_candidate_documents(
+        session,
+        req,
+        background_tasks,
+        knowledge_base_list,
+        candidate_top_k,
+    )
+    _record_evidence_retrieve_results(req, background_tasks, documents)
+    response = build_evidence_packages(
+        query=original_question,
+        rewrite_query=rewrite_question,
+        documents=documents,
+        options=options,
+        artifact_text_resolver=_download_artifact_text,
+    )
+    _log_evidence_retrieve_done(req, documents, response)
+    return response
+
+
+def _evidence_candidate_top_k(options: EvidencePackageOptions) -> int:
+    return expanded_candidate_top_k(
         options.package_top_k,
         options.max_evidence_per_package,
-        _get_evidence_candidate_multiplier(req),
+        EVIDENCE_PACKAGE_DEFAULT_CANDIDATE_MULTIPLIER,
         max_candidate_k=EVIDENCE_PACKAGE_MAX_CANDIDATE_K,
     )
 
+
+def _log_evidence_retrieve_start(req: QueryRequest, knowledge_base_list, candidate_top_k: int) -> None:
+    logger.info(
+        "evidence.retrieve.start request_id=%s kb_count=%s candidate_top_k=%s",
+        req.request_id,
+        len(knowledge_base_list),
+        candidate_top_k,
+    )
+
+
+def _rewrite_evidence_question(req: QueryRequest, background_tasks: BackgroundTasks, session: Session) -> str:
     rewrite_question = question_rewrite(
         req.question,
         MULTI_TURN_CONVERSATIONS_QUESTION_REWRITE_PROMPT,
@@ -686,28 +720,20 @@ def get_evidence_packages(
     req.question = rewrite_question
     if background_tasks and req.request_id:
         background_tasks.add_task(insert_rewrite_question_to_db, req.request_id, rewrite_question)
+    return rewrite_question
 
-    documents = query_online_qa_pairs(req, knowledge_base_list, session) if _include_online_qa(req) else []
-    if not documents:
-        documents = _retrieve_evidence_candidate_documents(
-            session,
-            req,
-            background_tasks,
-            knowledge_base_list,
-            candidate_top_k,
-        )
 
+def _record_evidence_retrieve_results(req: QueryRequest, background_tasks: BackgroundTasks, documents) -> None:
     if background_tasks and req.request_id:
         background_tasks.add_task(insert_retrieve_result_to_db, req.request_id, documents)
 
-    artifact_url_resolver = create_signed_url if options.artifact_mode == "signed_url" else None
-    return build_evidence_packages(
-        query=original_question,
-        rewrite_query=rewrite_question,
-        documents=documents,
-        options=options,
-        artifact_url_resolver=artifact_url_resolver,
-        artifact_text_resolver=_download_artifact_text,
+
+def _log_evidence_retrieve_done(req: QueryRequest, documents, response: EvidencePackageResponse) -> None:
+    logger.info(
+        "evidence.retrieve.done request_id=%s candidate_count=%s package_count=%s",
+        req.request_id,
+        len(documents),
+        len(response.packages),
     )
 
 
@@ -883,83 +909,15 @@ def _should_retrieve_kb_from_ipd(kb: KnowledgeBase, retrieve_config: KnowledgeBa
     return retrieve_config.retrieve_from_ipd_rag or (_is_ipd_rag_retrieve_kb(kb) and _is_enable_ipd_rag_retrieve())
 
 
-def _get_evidence_package_options(req: QueryRequest) -> EvidencePackageOptions:
-    package_top_k = _positive_int(
-        getattr(req, "package_top_k", None),
-        _positive_int(getattr(req, "top_k", None), EVIDENCE_PACKAGE_DEFAULT_TOP_K),
-    )
-    max_evidence_per_package = _positive_int(
-        getattr(req, "max_evidence_per_package", None),
-        EVIDENCE_PACKAGE_DEFAULT_EVIDENCE_PER_PACKAGE,
-    )
-    artifact_mode = getattr(req, "artifact_mode", None) or "key"
-    if artifact_mode not in {"key", "signed_url"}:
-        artifact_mode = "key"
+def _get_evidence_package_options() -> EvidencePackageOptions:
     return EvidencePackageOptions(
-        package_top_k=package_top_k,
-        max_evidence_per_package=max_evidence_per_package,
-        artifact_mode=artifact_mode,
-        enable_table_expansion=_bool_value(getattr(req, "enable_table_expansion", None), True),
-        table_expand_ratio_threshold=_ratio_float(
-            getattr(req, "table_expand_ratio_threshold", None),
-            EVIDENCE_PACKAGE_DEFAULT_TABLE_EXPAND_RATIO_THRESHOLD,
-        ),
-        max_full_table_rows=_non_negative_int(
-            getattr(req, "max_full_table_rows", None),
-            EVIDENCE_PACKAGE_DEFAULT_MAX_FULL_TABLE_ROWS,
-        ),
-        max_inline_table_chars=_non_negative_int(
-            getattr(req, "max_inline_table_chars", None),
-            EVIDENCE_PACKAGE_DEFAULT_MAX_INLINE_TABLE_CHARS,
-        ),
+        package_top_k=EVIDENCE_PACKAGE_DEFAULT_TOP_K,
+        max_evidence_per_package=EVIDENCE_PACKAGE_DEFAULT_EVIDENCE_PER_PACKAGE,
+        artifact_mode="key",
+        table_expand_ratio_threshold=EVIDENCE_PACKAGE_DEFAULT_TABLE_EXPAND_RATIO_THRESHOLD,
+        max_full_table_rows=EVIDENCE_PACKAGE_DEFAULT_MAX_FULL_TABLE_ROWS,
+        max_inline_table_chars=EVIDENCE_PACKAGE_DEFAULT_MAX_INLINE_TABLE_CHARS,
     )
-
-
-def _get_evidence_candidate_multiplier(req: QueryRequest) -> int:
-    return _positive_int(
-        getattr(req, "candidate_multiplier", None),
-        EVIDENCE_PACKAGE_DEFAULT_CANDIDATE_MULTIPLIER,
-    )
-
-
-def _include_online_qa(req: QueryRequest) -> bool:
-    return bool(getattr(req, "include_online_qa", False))
-
-
-def _positive_int(value: Any, default: int) -> int:
-    try:
-        parsed = int(value)
-    except (TypeError, ValueError):
-        return default
-    return parsed if parsed > 0 else default
-
-
-def _non_negative_int(value: Any, default: int) -> int:
-    try:
-        parsed = int(value)
-    except (TypeError, ValueError):
-        return default
-    return parsed if parsed >= 0 else default
-
-
-def _ratio_float(value: Any, default: float) -> float:
-    try:
-        parsed = float(value)
-    except (TypeError, ValueError):
-        return default
-    if parsed < 0 or parsed > 1:
-        return default
-    return parsed
-
-
-def _bool_value(value: Any, default: bool) -> bool:
-    if value is None:
-        return default
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, str):
-        return value.strip().lower() in {"1", "true", "yes", "on"}
-    return bool(value)
 
 
 def _download_artifact_text(object_key: str) -> Optional[str]:
