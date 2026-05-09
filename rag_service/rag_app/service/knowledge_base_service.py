@@ -316,6 +316,7 @@ from rag_service.retrieval.evidence_packages import (
     EvidencePackageOptions,
     EvidencePackageResponse,
     build_evidence_packages,
+    collect_evidence_candidate_documents,
     expanded_candidate_top_k,
     run_parallel_retrievers,
 )
@@ -726,7 +727,10 @@ def _retrieve_evidence_candidate_documents(
             knowledge_base_list,
             retrieve_config,
         )
-        documents, has_ipd_documents = _collect_evidence_candidate_documents(run_parallel_retrievers(retrievers))
+        documents, has_ipd_documents = collect_evidence_candidate_documents(
+            run_parallel_retrievers(retrievers),
+            max_documents=candidate_top_k,
+        )
         if judge_knowledge_base_rerank_retrieve(knowledge_base_list, req):
             return rerank_retrieved_documents(
                 req.question,
@@ -869,17 +873,6 @@ def _ipd_evidence_retriever(req: QueryRequest, retrieve_config: KnowledgeBaseCon
 
 def _source_tagged_retriever(source: str, retriever):
     return lambda: [(source, retriever())]
-
-
-def _collect_evidence_candidate_documents(candidate_batches) -> Tuple[List[RetrievedDocument], bool]:
-    documents = []
-    has_ipd_documents = False
-    for source, batch_documents in candidate_batches:
-        batch_documents = batch_documents or []
-        if source == "ipd" and batch_documents:
-            has_ipd_documents = True
-        documents.extend(batch_documents)
-    return filter_same_document(documents), has_ipd_documents
 
 
 def _should_retrieve_kb_from_ipd(kb: KnowledgeBase, retrieve_config: KnowledgeBaseConfig) -> bool:

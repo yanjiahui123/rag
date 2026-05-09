@@ -109,6 +109,36 @@ def _normalize_retriever_result(result: Optional[Iterable[Any]]) -> List[Any]:
     return list(result)
 
 
+def collect_evidence_candidate_documents(
+    candidate_batches: Iterable[Tuple[str, Optional[Iterable[Any]]]],
+    max_documents: Optional[int] = None,
+) -> Tuple[List[Any], bool]:
+    candidates_by_text: Dict[str, Any] = {}
+    has_ipd_documents = False
+    for source, batch_documents in candidate_batches:
+        batch_documents = list(batch_documents or [])
+        if source == "ipd" and batch_documents:
+            has_ipd_documents = True
+        _merge_candidate_documents(candidates_by_text, batch_documents)
+
+    documents = sorted(candidates_by_text.values(), key=_document_score, reverse=True)
+    if max_documents is not None:
+        documents = documents[:max(max_documents, 0)]
+    return documents, has_ipd_documents
+
+
+def _merge_candidate_documents(candidates_by_text: Dict[str, Any], documents: Iterable[Any]) -> None:
+    for document in documents:
+        key = getattr(document, "text", "") or ""
+        current = candidates_by_text.get(key)
+        if current is None or _document_score(document) > _document_score(current):
+            candidates_by_text[key] = document
+
+
+def _document_score(document: Any) -> float:
+    return float(getattr(document, "score", 0.0) or 0.0)
+
+
 def expanded_candidate_top_k(
     package_top_k: int,
     max_evidence_per_package: int,
@@ -348,10 +378,10 @@ def _document_group_key(metadata: Dict[str, Any], source: str) -> Tuple[Optional
 
 
 def _evidence_key(item: EvidenceItem) -> Tuple[str, str]:
-    if item.table_id:
-        return "table", item.table_id
     if item.block_id:
         return "block", item.block_id
+    if item.table_id:
+        return "table", item.table_id
     return "text", item.text
 
 
