@@ -1,3 +1,4 @@
+import base64
 import contextlib
 import json
 import re
@@ -319,6 +320,7 @@ from rag_service.retrieval.evidence_packages import (
     collect_evidence_candidate_documents,
     expanded_candidate_top_k,
     run_parallel_retrievers,
+    to_answer_evidence_response,
 )
 
 logger = get_logger(module=Module.APP)
@@ -689,6 +691,43 @@ def get_evidence_packages(
     )
     _log_evidence_retrieve_done(req, documents, response)
     return response
+
+
+def get_answer_evidence(
+    req: QueryRequest,
+    background_tasks: BackgroundTasks,
+    session: Session,
+) -> Dict[str, Any]:
+    return to_answer_evidence_response(
+        get_evidence_packages(req, background_tasks, session),
+        artifact_url_builder=lambda ref: _evidence_artifact_url(ref, req.uid),
+    )
+
+
+def _evidence_artifact_url(object_key: str, uid: str) -> str:
+    payload = json.dumps({"object_key": object_key, "uid": uid}, ensure_ascii=False).encode("utf-8")
+    artifact_id = base64.urlsafe_b64encode(payload).decode("ascii")
+    return f"/kb/evidence_artifacts/{quote(artifact_id)}"
+
+
+def get_evidence_artifact(artifact_id: str, uid: str) -> Tuple[str, bytes]:
+    payload = _decode_evidence_artifact_id(artifact_id)
+    if payload.get("uid") != uid:
+        raise OperationNotPermittedException("无权限读取证据附件")
+    object_key = payload.get("object_key")
+    if not object_key:
+        raise OperationNotPermittedException("无权限读取证据附件")
+    return object_key, download_file_as_bytes(object_key)
+
+
+def _decode_evidence_artifact_id(artifact_id: str) -> Dict[str, Any]:
+    try:
+        padded_artifact_id = artifact_id + "=" * (-len(artifact_id) % 4)
+        payload = base64.urlsafe_b64decode(padded_artifact_id.encode("ascii")).decode("utf-8")
+        decoded = json.loads(payload)
+    except Exception as exc:
+        raise OperationNotPermittedException("无权限读取证据附件") from exc
+    return decoded if isinstance(decoded, dict) else {}
 
 
 def _evidence_candidate_top_k(options: EvidencePackageOptions) -> int:

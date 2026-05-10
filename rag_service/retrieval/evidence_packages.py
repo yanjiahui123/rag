@@ -120,6 +120,7 @@ class DocumentEvidencePackage(BaseModel):
     evidence_count: int
     artifacts: PackageArtifacts
     evidence: List[EvidenceItem] = Field(default_factory=list)
+    candidate_slices: List[EvidenceItem] = Field(default_factory=list, exclude=True)
 
 
 class EvidencePackageResponse(BaseModel):
@@ -128,7 +129,7 @@ class EvidencePackageResponse(BaseModel):
     packages: List[DocumentEvidencePackage]
 
     def to_dict(self) -> Dict[str, Any]:
-        return self.model_dump()
+        return to_agent_evidence_response(self)
 
 
 ArtifactUrlResolver = Callable[[str], str]
@@ -136,30 +137,51 @@ ArtifactTextResolver = Callable[[str], Optional[str]]
 Retriever = Callable[[], Optional[Iterable[Any]]]
 
 
-def run_parallel_retrievers(retrievers: Iterable[Retriever]) -> List[Any]:
+def run_parallel_retrievers(
+    retrievers: Iterable[Retriever],
+    raise_on_all_failed: bool = False,
+) -> List[Any]:
     retriever_list = [retriever for retriever in retrievers if retriever is not None]
     if not retriever_list:
         return []
     if len(retriever_list) == 1:
-        return _collect_retriever_result(retriever_list[0])
+        return _collect_retriever_result(retriever_list[0], raise_on_all_failed)
 
     results: List[Any] = []
+    failure_count = 0
     with ThreadPoolExecutor(max_workers=len(retriever_list)) as pool:
-        futures = [pool.submit(retriever) for retriever in retriever_list]
+        futures = {pool.submit(retriever): retriever for retriever in retriever_list}
         for future in as_completed(futures):
+            retriever = futures[future]
             try:
                 result = future.result()
-            except Exception:
+            except Exception as exc:
+                failure_count += 1
+                _log_retriever_failure(retriever, exc)
                 continue
             results.extend(_normalize_retriever_result(result))
+    if raise_on_all_failed and failure_count == len(retriever_list):
+        raise RuntimeError("all retrievers failed")
     return results
 
 
-def _collect_retriever_result(retriever: Retriever) -> List[Any]:
+def _collect_retriever_result(retriever: Retriever, raise_on_all_failed: bool = False) -> List[Any]:
     try:
         return _normalize_retriever_result(retriever())
-    except Exception:
+    except Exception as exc:
+        _log_retriever_failure(retriever, exc)
+        if raise_on_all_failed:
+            raise RuntimeError("all retrievers failed") from exc
         return []
+
+
+def _log_retriever_failure(retriever: Retriever, exc: Exception) -> None:
+    LOGGER.warning(
+        "evidence.retriever_failed source=%s name=%s error=%s",
+        getattr(retriever, "source", None),
+        getattr(retriever, "name", None),
+        exc,
+    )
 
 
 def _normalize_retriever_result(result: Optional[Iterable[Any]]) -> List[Any]:
@@ -261,6 +283,200 @@ def build_evidence_packages(
         len(packages),
     )
     return EvidencePackageResponse(query=query, rewrite_query=rewrite_query, packages=packages)
+
+
+def to_answer_evidence_response(
+    response: EvidencePackageResponse,
+    artifact_url_builder: Optional[ArtifactUrlResolver] = None,
+) -> Dict[str, Any]:
+    llm_context = []
+    display_sources = []
+    context_index = 1
+
+    for source_index, package in enumerate(response.packages, start=1):
+        source_id = f"S{source_index}"
+        source_items = []
+        table_artifacts = {artifact.table_id: artifact for artifact in package.artifacts.tables}
+        for item in package.evidence:
+            context_id = f"C{context_index}"
+            context_index += 1
+            content_type = _answer_content_type(item)
+            title = _answer_item_title(item, package, table_artifacts)
+            llm_context.append(
+                {
+                    "context_id": context_id,
+                    "source_id": source_id,
+                    "title": title,
+                    "content": item.text,
+                    "content_type": content_type,
+                    "score": item.score,
+                }
+            )
+            source_items.append(
+                _answer_display_item(
+                    context_id,
+                    item,
+                    package,
+                    table_artifacts,
+                    artifact_url_builder,
+                )
+            )
+
+        display_sources.append(_answer_display_source(package, source_id, source_items))
+
+    return {
+        "query": response.query,
+        "rewrite_query": response.rewrite_query,
+        "llm_context": llm_context,
+        "display_sources": display_sources,
+    }
+
+
+def to_agent_evidence_response(response: EvidencePackageResponse) -> Dict[str, Any]:
+    return {
+        "query": response.query,
+        "rewrite_query": response.rewrite_query,
+        "packages": [_agent_package(package) for package in response.packages],
+    }
+
+
+def _answer_display_source(
+    package: DocumentEvidencePackage,
+    source_id: str,
+    source_items: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    return {
+        "source_id": source_id,
+        "title": package.title or package.source,
+        "source": package.source,
+        "score": package.score,
+        "items": source_items,
+    }
+
+
+def _agent_package(package: DocumentEvidencePackage) -> Dict[str, Any]:
+    package_dict = package.model_dump()
+    package_dict["slices"] = [
+        _agent_slice(package, item, rank)
+        for rank, item in enumerate(package.candidate_slices, start=1)
+    ]
+    return package_dict
+
+
+def _agent_slice(package: DocumentEvidencePackage, item: EvidenceItem, rank: int) -> Dict[str, Any]:
+    return {
+        "slice_id": _slice_id(package, item, rank),
+        "rank": rank,
+        "text": item.text,
+        "score": item.score,
+        "block_id": item.block_id,
+        "block_index": item.block_index,
+        "block_type": item.block_type,
+        "section_id": item.section_id,
+        "table_id": item.table_id,
+        "row_range": item.row_range,
+        "row_count": item.row_count,
+        "title": item.title,
+        "headers": item.headers,
+        "refs": dict(item.refs),
+        "artifact_keys": dict(item.artifact_keys),
+        "es_index": item.es_index,
+        "es_doc_id": item.es_doc_id,
+    }
+
+
+def _slice_id(package: DocumentEvidencePackage, item: EvidenceItem, rank: int) -> str:
+    doc_id = package.doc_id or package.source or "document"
+    item_id = item.block_id or item.table_id or item.section_id or f"slice_{rank}"
+    return f"{doc_id}:{item_id}"
+
+
+def _answer_content_type(item: EvidenceItem) -> str:
+    if item.evidence_type == "table" or item.block_type == "table" or item.table_id:
+        return "table"
+    return "text"
+
+
+def _answer_item_title(
+    item: EvidenceItem,
+    package: DocumentEvidencePackage,
+    table_artifacts: Dict[str, TableArtifact],
+) -> Optional[str]:
+    if item.title:
+        return item.title
+    if item.table_id and item.table_id in table_artifacts:
+        return table_artifacts[item.table_id].title
+    return package.title
+
+
+def _answer_display_item(
+    context_id: str,
+    item: EvidenceItem,
+    package: DocumentEvidencePackage,
+    table_artifacts: Dict[str, TableArtifact],
+    artifact_url_builder: Optional[ArtifactUrlResolver],
+) -> Dict[str, Any]:
+    if _answer_content_type(item) == "table":
+        return _answer_table_display_item(context_id, item, package, table_artifacts, artifact_url_builder)
+    return {
+        "type": "text",
+        "context_id": context_id,
+        "title": _answer_item_title(item, package, table_artifacts),
+        "content": item.text,
+    }
+
+
+def _answer_table_display_item(
+    context_id: str,
+    item: EvidenceItem,
+    package: DocumentEvidencePackage,
+    table_artifacts: Dict[str, TableArtifact],
+    artifact_url_builder: Optional[ArtifactUrlResolver],
+) -> Dict[str, Any]:
+    artifact = table_artifacts.get(item.table_id or "")
+    display_item: Dict[str, Any] = {
+        "type": "table",
+        "context_id": context_id,
+        "title": _answer_item_title(item, package, table_artifacts),
+        "row_count": _table_display_row_count(item, artifact),
+        "hit_row_ranges": _table_display_hit_row_ranges(item, artifact),
+    }
+    display_ref = _table_display_ref(item, artifact)
+    if display_ref and artifact_url_builder:
+        display_item["display"] = {
+            "mode": "url",
+            "url": artifact_url_builder(display_ref),
+        }
+    return display_item
+
+
+def _table_display_ref(item: EvidenceItem, artifact: Optional[TableArtifact]) -> Optional[str]:
+    if item.refs.get("display"):
+        return item.refs["display"]
+    if artifact and artifact.refs.get("display"):
+        return artifact.refs["display"]
+    return None
+
+
+def _table_display_row_count(item: EvidenceItem, artifact: Optional[TableArtifact]) -> Optional[int]:
+    if item.row_count is not None:
+        return item.row_count
+    if artifact:
+        return artifact.row_count
+    return None
+
+
+def _table_display_hit_row_ranges(
+    item: EvidenceItem,
+    artifact: Optional[TableArtifact],
+) -> List[List[int]]:
+    if item.hit_row_ranges:
+        return item.hit_row_ranges
+    if artifact:
+        return artifact.hit_row_ranges
+    if item.row_range:
+        return [[item.row_range[0], item.row_range[1]]]
+    return []
 
 
 def _prepared_artifact_url_resolver(
@@ -395,6 +611,7 @@ class _PackageAccumulator:
             evidence_count=len(self._items_by_key),
             artifacts=PackageArtifacts(document=self.document_artifact, sections=section_artifacts, tables=table_artifacts),
             evidence=evidence,
+            candidate_slices=all_evidence,
         )
 
 

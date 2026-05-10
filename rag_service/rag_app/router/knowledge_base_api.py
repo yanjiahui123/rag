@@ -170,6 +170,26 @@ def get_evidence_packages(
     return knowledge_base_service.get_evidence_packages(req, background_tasks, session).to_dict()
 
 
+@router.post("/get_answer_evidence", response_model=None)
+@ensure_background_tasks
+@collect_usage
+def get_answer_evidence(
+    request: Request,
+    req: EvidencePackageRequest,
+    background_tasks: BackgroundTasks,
+    session: Session = Depends(yield_session),
+) -> dict:
+    req.request_id = context.data.get("X-Request-ID")
+    req.uid = request.state.uid if request.state.uid else req.uid
+    return knowledge_base_service.get_answer_evidence(req, background_tasks, session)
+
+
+@router.get("/evidence_artifacts/{artifact_id}", response_model=None)
+def get_evidence_artifact(request: Request, artifact_id: str) -> Response:
+    object_key, content = knowledge_base_service.get_evidence_artifact(artifact_id, request.state.uid)
+    return Response(content=content, media_type=guess_type(object_key)[0] or "application/octet-stream")
+
+
 @router.post("/get_answer")
 @ensure_background_tasks
 @collect_usage
