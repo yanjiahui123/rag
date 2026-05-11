@@ -36,6 +36,7 @@ class AgentRetrievalHandleCodec:
         return f"{body_token}.{signature}"
 
     def decode(self, handle: str, expected_uid: Optional[str] = None) -> Dict[str, Any]:
+        handle = handle.strip()
         try:
             body_token, signature = handle.split(".", 1)
         except ValueError as exc:
@@ -70,4 +71,3 @@ def _b64encode(value: bytes) -> str:
 
 def _b64decode(value: str) -> bytes:
     return base64.urlsafe_b64decode(value + "=" * (-len(value) % 4))
-

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 
@@ -35,22 +35,22 @@ def search_slices(
 
 @router.post("/get_document_outline", response_model=None)
 def get_document_outline(request: Request, req: DocumentOutlineRequest) -> dict:
-    return _dump(_service().get_document_outline(req, uid=_request_uid(request, req)))
+    return _dump_or_403(lambda: _service().get_document_outline(req, uid=_request_uid(request, req)))
 
 
 @router.post("/get_section", response_model=None)
 def get_section(request: Request, req: SectionRequest) -> dict:
-    return _dump(_service().get_section(req, uid=_request_uid(request, req)))
+    return _dump_or_403(lambda: _service().get_section(req, uid=_request_uid(request, req)))
 
 
 @router.post("/get_table", response_model=None)
 def get_table(request: Request, req: TableRequest) -> dict:
-    return _dump(_service().get_table(req, uid=_request_uid(request, req)))
+    return _dump_or_403(lambda: _service().get_table(req, uid=_request_uid(request, req)))
 
 
 @router.post("/get_original_text", response_model=None)
 def get_original_text(request: Request, req: OriginalTextRequest) -> dict:
-    return _dump(_service().get_original_text(req, uid=_request_uid(request, req)))
+    return _dump_or_403(lambda: _service().get_original_text(req, uid=_request_uid(request, req)))
 
 
 @router.get("/opencode/skill-package", response_model=None)
@@ -76,3 +76,10 @@ def _dump(model) -> dict:
     if hasattr(model, "model_dump"):
         return model.model_dump()
     return model.dict()
+
+
+def _dump_or_403(factory: Callable[[], Any]) -> dict:
+    try:
+        return _dump(factory())
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
