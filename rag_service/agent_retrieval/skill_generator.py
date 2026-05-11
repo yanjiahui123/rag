@@ -20,7 +20,7 @@ def generate_opencode_skill_package(
     return SkillPackageResponse(
         files={
             "SKILL.md": _skill_md(base_url, kb_sn_list),
-            "config.example.json": json.dumps(config, ensure_ascii=False, indent=2),
+            "config.json": json.dumps(config, ensure_ascii=False, indent=2),
             "references/api_schema.md": _api_schema_md(),
             "scripts/kb_retrieval.py": _client_script(),
         }
@@ -51,7 +51,17 @@ Use this skill to search configured knowledge bases and inspect source evidence.
 
 ## Configuration
 
-Set these environment variables or copy `config.example.json` and pass it with `--config`:
+Edit `config.json` in this skill folder:
+
+```json
+{{
+  "base_url": "{base_url}",
+  "kb_sn_list": ["{kb_text}"],
+  "timeout_seconds": 30
+}}
+```
+
+Environment variables can override the file when needed:
 
 ```bash
 export KB_RETRIEVAL_BASE_URL="{base_url}"
@@ -158,6 +168,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+from pathlib import Path
 import sys
 import urllib.error
 import urllib.request
@@ -201,8 +212,9 @@ def main(argv=None):
 
 def load_config(path):
     config = {}
-    if path:
-        with open(path, "r", encoding="utf-8") as handle:
+    config_path = Path(path) if path else default_config_path()
+    if config_path.exists():
+        with config_path.open("r", encoding="utf-8") as handle:
             config.update(json.load(handle))
     if os.getenv("KB_RETRIEVAL_BASE_URL"):
         config["base_url"] = os.environ["KB_RETRIEVAL_BASE_URL"]
@@ -212,6 +224,10 @@ def load_config(path):
         raise SystemExit("Missing KB_RETRIEVAL_BASE_URL or config base_url.")
     config.setdefault("kb_sn_list", [])
     return config
+
+
+def default_config_path():
+    return Path(__file__).resolve().parents[1] / "config.json"
 
 
 def build_payload(args, config):
