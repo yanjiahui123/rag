@@ -30,27 +30,27 @@ def search_slices(
     req: SearchSlicesRequest,
     session: Any = Depends(yield_session),
 ) -> dict:
-    return _dump(_service().search_slices(req, uid=_request_uid(request), session=session))
+    return _dump(_service().search_slices(req, uid=_request_uid(request, req), session=session))
 
 
 @router.post("/get_document_outline", response_model=None)
 def get_document_outline(request: Request, req: DocumentOutlineRequest) -> dict:
-    return _dump(_service().get_document_outline(req, uid=_request_uid(request)))
+    return _dump(_service().get_document_outline(req, uid=_request_uid(request, req)))
 
 
 @router.post("/get_section", response_model=None)
 def get_section(request: Request, req: SectionRequest) -> dict:
-    return _dump(_service().get_section(req, uid=_request_uid(request)))
+    return _dump(_service().get_section(req, uid=_request_uid(request, req)))
 
 
 @router.post("/get_table", response_model=None)
 def get_table(request: Request, req: TableRequest) -> dict:
-    return _dump(_service().get_table(req, uid=_request_uid(request)))
+    return _dump(_service().get_table(req, uid=_request_uid(request, req)))
 
 
 @router.post("/get_original_text", response_model=None)
 def get_original_text(request: Request, req: OriginalTextRequest) -> dict:
-    return _dump(_service().get_original_text(req, uid=_request_uid(request)))
+    return _dump(_service().get_original_text(req, uid=_request_uid(request, req)))
 
 
 @router.get("/opencode/skill-package", response_model=None)
@@ -59,8 +59,10 @@ def get_opencode_skill_package(base_url: Optional[str] = None, kb_sn_list: Optio
     return _dump(generate_opencode_skill_package(base_url=base_url, kb_sn_list=parsed_kb_sn_list))
 
 
-def _request_uid(request: Request) -> str:
+def _request_uid(request: Request, req: Any) -> str:
     uid = getattr(getattr(request, "state", None), "uid", None)
+    if not uid:
+        uid = getattr(req, "uid", None)
     if not uid:
         raise HTTPException(status_code=401, detail="authenticated user is required")
     return str(uid)
@@ -74,4 +76,3 @@ def _dump(model) -> dict:
     if hasattr(model, "model_dump"):
         return model.model_dump()
     return model.dict()
-

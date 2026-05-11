@@ -14,6 +14,7 @@ def generate_opencode_skill_package(
     kb_sn_list = list(kb_sn_list or [])
     config = {
         "base_url": base_url,
+        "uid": "",
         "kb_sn_list": kb_sn_list,
         "timeout_seconds": 30,
     }
@@ -56,6 +57,7 @@ Edit `config.json` in this skill folder:
 ```json
 {{
   "base_url": "{base_url}",
+  "uid": "your-employee-id",
   "kb_sn_list": ["{kb_text}"],
   "timeout_seconds": 30
 }}
@@ -65,6 +67,7 @@ Environment variables can override the file when needed:
 
 ```bash
 export KB_RETRIEVAL_BASE_URL="{base_url}"
+export KB_RETRIEVAL_UID="your-employee-id"
 export KB_SN_LIST="{kb_text}"
 ```
 
@@ -115,7 +118,7 @@ Base path: `/agent/retrieval`
 Body:
 
 ```json
-{{"query": "question", "kb_sn_list": ["kb-1"], "top_k": 20}}
+{{"uid": "employee-id", "query": "question", "kb_sn_list": ["kb-1"], "top_k": 20}}
 ```
 
 Returns ranked slices with document metadata, location metadata, action flags, and opaque handles.
@@ -125,7 +128,7 @@ Returns ranked slices with document metadata, location metadata, action flags, a
 Body:
 
 ```json
-{{"document_handle": "..."}}
+{{"uid": "employee-id", "document_handle": "..."}}
 ```
 
 Returns sections and tables discovered from the document manifest.
@@ -135,7 +138,7 @@ Returns sections and tables discovered from the document manifest.
 Body:
 
 ```json
-{{"section_handle": "...", "max_chars": 12000}}
+{{"uid": "employee-id", "section_handle": "...", "max_chars": 12000}}
 ```
 
 Returns section markdown text.
@@ -145,7 +148,7 @@ Returns section markdown text.
 Body:
 
 ```json
-{{"table_handle": "...", "mode": "llm_text"}}
+{{"uid": "employee-id", "table_handle": "...", "mode": "llm_text"}}
 ```
 
 Modes: `llm_text`, `json`, `html`, `summary`.
@@ -155,7 +158,7 @@ Modes: `llm_text`, `json`, `html`, `summary`.
 Body:
 
 ```json
-{{"document_handle": "...", "center_block_id": "block_001", "before": 2, "after": 2}}
+{{"uid": "employee-id", "document_handle": "...", "center_block_id": "block_001", "before": 2, "after": 2}}
 ```
 
 Returns bounded neighboring block text when available.
@@ -218,6 +221,8 @@ def load_config(path):
             config.update(json.load(handle))
     if os.getenv("KB_RETRIEVAL_BASE_URL"):
         config["base_url"] = os.environ["KB_RETRIEVAL_BASE_URL"]
+    if os.getenv("KB_RETRIEVAL_UID"):
+        config["uid"] = os.environ["KB_RETRIEVAL_UID"]
     if os.getenv("KB_SN_LIST"):
         config["kb_sn_list"] = [item.strip() for item in os.environ["KB_SN_LIST"].split(",") if item.strip()]
     if not config.get("base_url"):
@@ -232,15 +237,16 @@ def default_config_path():
 
 def build_payload(args, config):
     if args.command == "search":
-        return {"query": args.query, "kb_sn_list": config.get("kb_sn_list", []), "top_k": args.top_k}
+        return {"uid": config.get("uid"), "query": args.query, "kb_sn_list": config.get("kb_sn_list", []), "top_k": args.top_k}
     if args.command == "outline":
-        return {"document_handle": args.document_handle}
+        return {"uid": config.get("uid"), "document_handle": args.document_handle}
     if args.command == "section":
-        return {"section_handle": args.section_handle, "max_chars": args.max_chars}
+        return {"uid": config.get("uid"), "section_handle": args.section_handle, "max_chars": args.max_chars}
     if args.command == "table":
-        return {"table_handle": args.table_handle, "mode": args.mode, "max_chars": args.max_chars}
+        return {"uid": config.get("uid"), "table_handle": args.table_handle, "mode": args.mode, "max_chars": args.max_chars}
     if args.command == "original-text":
         return {
+            "uid": config.get("uid"),
             "document_handle": args.document_handle,
             "center_block_id": args.center_block_id,
             "before": args.before,

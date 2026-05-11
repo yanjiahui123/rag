@@ -5,7 +5,11 @@ from typing import Dict, List, Literal, Optional
 from pydantic import BaseModel, Field
 
 
-class SearchSlicesRequest(BaseModel):
+class AgentRetrievalRequest(BaseModel):
+    uid: Optional[str] = None
+
+
+class SearchSlicesRequest(AgentRetrievalRequest):
     query: str
     kb_sn: Optional[str] = None
     kb_sn_list: List[str] = Field(default_factory=list)
@@ -64,7 +68,7 @@ class SearchSlicesResponse(BaseModel):
     slices: List[SearchSlice] = Field(default_factory=list)
 
 
-class DocumentOutlineRequest(BaseModel):
+class DocumentOutlineRequest(AgentRetrievalRequest):
     document_handle: str
 
 
@@ -90,7 +94,7 @@ class DocumentOutlineResponse(BaseModel):
     tables: List[OutlineTable] = Field(default_factory=list)
 
 
-class SectionRequest(BaseModel):
+class SectionRequest(AgentRetrievalRequest):
     section_handle: str
     max_chars: int = 12000
 
@@ -107,7 +111,7 @@ class SectionResponse(BaseModel):
 TableMode = Literal["llm_text", "json", "html", "summary"]
 
 
-class TableRequest(BaseModel):
+class TableRequest(AgentRetrievalRequest):
     table_handle: str
     mode: TableMode = "llm_text"
     max_chars: int = 40000
@@ -122,7 +126,7 @@ class TableResponse(BaseModel):
     truncated: bool = False
 
 
-class OriginalTextRequest(BaseModel):
+class OriginalTextRequest(AgentRetrievalRequest):
     document_handle: str
     center_block_id: Optional[str] = None
     before: int = 2
@@ -146,4 +150,3 @@ class OriginalTextResponse(BaseModel):
 class SkillPackageResponse(BaseModel):
     name: str = "kb-retrieval"
     files: Dict[str, str] = Field(default_factory=dict)
-
