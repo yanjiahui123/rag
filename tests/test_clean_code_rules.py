@@ -9,6 +9,7 @@ RULE_FILE = ROOT / "docs" / "CLEAN_CODE.md"
 MODEL_FILES = [
     ROOT / "rag_service" / "document_loaders" / "parsed_blocks.py",
     ROOT / "rag_service" / "document_loaders" / "table" / "models.py",
+    ROOT / "rag_service" / "document_loaders" / "table" / "docx_parser.py",
 ]
 SOURCE_FILES = list((ROOT / "rag_service").rglob("*.py"))
 

@@ -186,6 +186,66 @@ class LoaderPipelineTests(unittest.TestCase):
         self.assertEqual(extended_metadata["online_url_type"], "video")
         self.assertEqual(extended_metadata["display"]["type"], "table")
 
+    def test_parse_file_prefers_structured_document_over_legacy_load(self):
+        original_document = FakeOriginalDocument()
+        parsed_document_factory = self.loader.ParsedDocument
+
+        class StructuredLoader:
+            load_called = False
+
+            def parse_to_document(self):
+                return parsed_document_factory(text="structured docx", metadata={"source": "demo.docx"})
+
+            def load(self):
+                self.load_called = True
+                return [FakeDocument(page_content="legacy docx", metadata={"source": "demo.docx"})]
+
+        structured_loader = StructuredLoader()
+        original_get_loader = self.loader.get_loader
+        self.loader.get_loader = lambda *args, **kwargs: structured_loader
+        try:
+            parsed_document = self.loader.parse_file(original_document, types.SimpleNamespace(), FakeAssetType.QA_PAIR)
+        finally:
+            self.loader.get_loader = original_get_loader
+
+        self.assertEqual(parsed_document.text, "structured docx")
+        self.assertEqual(parsed_document.blocks, [])
+        self.assertFalse(structured_loader.load_called)
+
+    def test_docx_default_loader_uses_structured_loader_for_new_documents(self):
+        default_loader = self.loader._TYPE_TO_DEFAULT_LOADER[".docx"]
+
+        self.assertIs(default_loader, self.loader.StructuredDocxByBlockLoader)
+
+    def test_xlsx_default_loader_uses_structured_loader_for_new_documents(self):
+        default_loader = self.loader._TYPE_TO_DEFAULT_LOADER[".xlsx"]
+
+        self.assertIs(default_loader, self.loader.StructuredXlsxByBlockLoader)
+
+    def test_html_default_loader_uses_structured_loader_for_new_documents(self):
+        default_loader = self.loader._TYPE_TO_DEFAULT_LOADER[".html"]
+
+        self.assertIs(default_loader, self.loader.StructuredHtmlByBlockLoader)
+
+    def test_markdown_default_loader_uses_structured_loader_for_new_documents(self):
+        default_loader = self.loader._TYPE_TO_DEFAULT_LOADER[".md"]
+
+        self.assertIs(default_loader, self.loader.StructuredMarkdownByBlockLoader)
+
+    def test_structured_default_loaders_receive_original_source(self):
+        vectorization_config = types.SimpleNamespace(loader_configs=[])
+
+        for suffix in [".docx", ".xlsx", ".html", ".md"]:
+            with self.subTest(suffix=suffix):
+                loader = self.loader.get_loader(
+                    "tmp/internal-upload-id" + suffix,
+                    vectorization_config,
+                    "用户上传的原始文件名" + suffix,
+                    FakeAssetType.QA_PAIR,
+                )
+
+                self.assertEqual(loader.loader.source, "用户上传的原始文件名" + suffix)
+
 
 if __name__ == "__main__":
     unittest.main()

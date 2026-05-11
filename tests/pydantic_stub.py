@@ -16,7 +16,7 @@ def install_pydantic_stub():
     sys.modules["pydantic"] = module
 
 
-def Field(default=None, default_factory=None):
+def Field(default=None, default_factory=None, **kwargs):
     if default_factory is not None:
         return default_factory()
     return default
