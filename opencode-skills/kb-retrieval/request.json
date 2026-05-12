@@ -1,0 +1,7 @@
+{
+  "command": "search",
+  "pretty": true,
+  "utf8_output": true,
+  "query": "",
+  "top_k": 20
+}

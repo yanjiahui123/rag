@@ -1,0 +1,8 @@
+{
+  "base_url": "http://localhost:8001",
+  "uid": "",
+  "kb_sn_list": [
+    "your-kb-sn"
+  ],
+  "timeout_seconds": 30
+}
