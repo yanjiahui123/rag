@@ -13,6 +13,7 @@ STRUCTURED_HTML_METADATA_KEY = "structured_html"
 STRUCTURED_MARKDOWN_ARTIFACTS_KEY = "_structured_markdown_artifacts"
 STRUCTURED_MARKDOWN_METADATA_KEY = "structured_markdown"
 PARSED_MARKDOWN_METADATA_KEY = "parsed_markdown"
+IMAGE_OBJECT_KEYS_METADATA_KEY = "image_object_keys"
 
 _SAFE_ARTIFACT_TYPES = (
     "structured_docx",
@@ -71,6 +72,26 @@ def extract_structured_markdown_artifact_prefix(extended_metadata: Optional[Dict
 
 def extract_parsed_markdown_artifact_prefix(extended_metadata: Optional[Dict[str, Any]]) -> Optional[str]:
     return _extract_artifact_prefix(extended_metadata, PARSED_MARKDOWN_METADATA_KEY)
+
+
+def extract_structured_image_object_keys(extended_metadata: Optional[Dict[str, Any]]) -> List[str]:
+    if not extended_metadata:
+        return []
+    keys = []
+    seen = set()
+    for metadata_key in (
+        STRUCTURED_DOCX_METADATA_KEY,
+        STRUCTURED_EXCEL_METADATA_KEY,
+        STRUCTURED_HTML_METADATA_KEY,
+        STRUCTURED_MARKDOWN_METADATA_KEY,
+    ):
+        metadata = extended_metadata.get(metadata_key) or {}
+        for object_key in metadata.get(IMAGE_OBJECT_KEYS_METADATA_KEY) or []:
+            if not object_key or object_key in seen:
+                continue
+            seen.add(object_key)
+            keys.append(str(object_key))
+    return keys
 
 
 def _extract_artifact_prefix(extended_metadata: Optional[Dict[str, Any]], metadata_key: str) -> Optional[str]:
@@ -216,7 +237,7 @@ def _persist_structured_artifacts(
     _apply_table_refs(parsed_document, table_refs)
     manifest_key = _upload_manifest(prefix, parsed_document, upload_content)
     parsed_document.metadata.pop(artifacts_key, None)
-    summary = _artifact_summary(prefix, document_key, manifest_key, parsed_document, table_refs)
+    summary = _artifact_summary(prefix, document_key, manifest_key, parsed_document, table_refs, artifacts)
     parsed_document.metadata[metadata_key] = summary
     return summary
 
@@ -361,14 +382,31 @@ def _manifest_section(first_block: Any, blocks) -> Dict[str, Any]:
     }
 
 
-def _artifact_summary(prefix, document_key, manifest_key, parsed_document, table_refs):
-    return {
+def _artifact_summary(prefix, document_key, manifest_key, parsed_document, table_refs, artifacts=None):
+    summary = {
         "artifact_prefix": prefix,
         "document_markdown_key": document_key,
         "manifest_key": manifest_key,
         "table_count": len(table_refs),
         "block_count": len(parsed_document.blocks),
     }
+    image_object_keys = _image_object_keys(artifacts)
+    if image_object_keys:
+        summary[IMAGE_OBJECT_KEYS_METADATA_KEY] = image_object_keys
+    return summary
+
+
+def _image_object_keys(artifacts: Optional[Dict[str, Any]]) -> List[str]:
+    if not artifacts:
+        return []
+    keys = []
+    seen = set()
+    for object_key in artifacts.get(IMAGE_OBJECT_KEYS_METADATA_KEY) or []:
+        if not object_key or object_key in seen:
+            continue
+        seen.add(object_key)
+        keys.append(str(object_key))
+    return keys
 
 
 def _parsed_document_markdown(parsed_document: Any) -> str:

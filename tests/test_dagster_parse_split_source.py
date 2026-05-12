@@ -56,6 +56,9 @@ class DagsterParseSplitSourceTests(unittest.TestCase):
         self.assertIn("extract_structured_html_artifact_prefix", source)
         self.assertIn("extract_structured_markdown_artifact_prefix", source)
         self.assertIn("extract_parsed_markdown_artifact_prefix", source)
+        self.assertIn("extract_structured_image_object_keys", source)
+        self.assertIn("_delete_structured_image_objects", source)
+        self.assertIn("delete_object(image_object_key)", source)
         self.assertIn("is_safe_structured_artifact_prefix", source)
         self.assertIn("delete_download_key", source)
 

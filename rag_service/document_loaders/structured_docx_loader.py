@@ -1,9 +1,15 @@
 from __future__ import annotations
 
+import re
 from typing import Any, Dict, Iterable, List, Optional
 
 from pydantic import BaseModel, Field
 
+from rag_service.document_loaders.image_markdown import (
+    ImageMarkdown,
+    image_extension_from_partname,
+    upload_image_bytes,
+)
 from rag_service.document_loaders.parsed_blocks import (
     BLOCK_TYPE_TABLE,
     BLOCK_TYPE_TEXT,
@@ -16,6 +22,9 @@ from rag_service.document_loaders.structured_artifacts import STRUCTURED_DOCX_AR
 from rag_service.document_loaders.structured_loader import StructuredDocumentLoader
 from rag_service.document_loaders.table.models import TableBlock
 from rag_service.document_loaders.table.docx_parser import DocxTableParser
+
+IMAGE_RELATION_PATTERN = re.compile(r'\br:(?:embed|id)="([^"]+)"')
+IMAGE_MARKERS = ("pic:pic", "imagedata", "a:blip")
 
 
 class DocxMarkdownElement(BaseModel):
@@ -31,6 +40,7 @@ class StructuredDocxLoader(StructuredDocumentLoader):
     def __init__(self, file_path: str, source: Optional[str] = None, table_parser: Optional[DocxTableParser] = None):
         super().__init__(file_path, source)
         self.table_parser = table_parser or DocxTableParser()
+        self.image_object_keys: List[str] = []
 
     def parse_blocks(self) -> List[ParsedBlock]:
         return self.parse_to_document().to_blocks()
@@ -39,6 +49,7 @@ class StructuredDocxLoader(StructuredDocumentLoader):
         return self.parse_document(self._open_document())
 
     def parse_document(self, document: Any) -> ParsedDocument:
+        self.image_object_keys = []
         elements = self._document_to_markdown_elements(document)
         if not elements:
             return ParsedDocument(metadata=self._base_metadata([], 0))
@@ -53,19 +64,22 @@ class StructuredDocxLoader(StructuredDocumentLoader):
                 elements.append(self._table_element(block, headers, block_index, table_index))
                 table_index += 1
                 continue
-            headers = self._append_paragraph_element(elements, block, headers, block_index)
+            headers = self._append_paragraph_element(elements, block, headers, block_index, document)
         return elements
 
-    def _append_paragraph_element(self, elements, block, headers, block_index):
+    def _append_paragraph_element(self, elements, block, headers, block_index, document=None):
         text = self._paragraph_text(block)
-        if not text:
+        image_markdown = self._paragraph_image_markdown(block, document)
+        if not text and not image_markdown:
             return headers
-        heading_level = self._heading_level(block)
+        heading_level = self._heading_level(block) if text else None
         if heading_level is None:
-            elements.append(self._text_element(text, headers, block_index))
+            elements.append(self._text_element(_combine_text_and_images(text, image_markdown), headers, block_index))
             return headers
         next_headers = self._replace_header(headers, heading_level, text)
         elements.append(self._heading_element(text, heading_level, next_headers, block_index))
+        if image_markdown:
+            elements.append(self._text_element("\n".join(image_markdown), next_headers, block_index))
         return next_headers
 
     def _open_document(self) -> Any:
@@ -87,6 +101,23 @@ class StructuredDocxLoader(StructuredDocumentLoader):
     @staticmethod
     def _paragraph_text(block: Any) -> str:
         return str(getattr(block, "text", "") or "").strip()
+
+    def _paragraph_image_markdown(self, block: Any, document: Any) -> List[str]:
+        xml = str(getattr(getattr(block, "_p", None), "xml", "") or "")
+        if not _contains_image_marker(xml):
+            return []
+        related_parts = _related_parts(document, block)
+        image_links = []
+        for relation_id in _image_relation_ids(xml):
+            image_part = related_parts.get(relation_id)
+            if not _is_image_part(image_part):
+                continue
+            image = _upload_image_part(image_part)
+            if image.markdown:
+                image_links.append(image.markdown)
+            if image.object_key:
+                self.image_object_keys.append(image.object_key)
+        return image_links
 
     def _heading_level(self, block: Any) -> Optional[int]:
         style_name = getattr(getattr(block, "style", None), "name", "")
@@ -158,6 +189,7 @@ class StructuredDocxLoader(StructuredDocumentLoader):
             "document_markdown": self._document_markdown(elements),
             "manifest": self._manifest(blocks),
             "tables": self._table_artifacts(elements),
+            "image_object_keys": list(dict.fromkeys(self.image_object_keys)),
         }
         return metadata
 
@@ -170,6 +202,9 @@ class StructuredDocxLoader(StructuredDocumentLoader):
                 text_elements = []
                 blocks.append(self._table_parsed_block(element))
             else:
+                if element.heading_level is not None and text_elements:
+                    self._append_text_block(blocks, text_elements)
+                    text_elements = []
                 text_elements.append(element)
         self._append_text_block(blocks, text_elements)
         return blocks
@@ -265,3 +300,50 @@ class StructuredDocxLoader(StructuredDocumentLoader):
     @staticmethod
     def _table_id(table_index: int) -> str:
         return f"table_{table_index + 1:03d}"
+
+
+def _contains_image_marker(xml: str) -> bool:
+    return any(marker in xml for marker in IMAGE_MARKERS)
+
+
+def _image_relation_ids(xml: str) -> List[str]:
+    relation_ids = []
+    seen = set()
+    for relation_id in IMAGE_RELATION_PATTERN.findall(xml):
+        if relation_id in seen:
+            continue
+        seen.add(relation_id)
+        relation_ids.append(relation_id)
+    return relation_ids
+
+
+def _related_parts(document: Any, block: Any) -> Dict[str, Any]:
+    for owner in (document, block):
+        part = getattr(owner, "part", None)
+        related_parts = getattr(part, "related_parts", None)
+        if isinstance(related_parts, dict):
+            return related_parts
+    return {}
+
+
+def _is_image_part(image_part: Any) -> bool:
+    if image_part is None:
+        return False
+    content_type = str(getattr(image_part, "content_type", "") or "")
+    if content_type.startswith("image/"):
+        return True
+    partname = str(getattr(image_part, "partname", "") or "").lower()
+    return partname.endswith((".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".tif", ".tiff", ".svg"))
+
+
+def _upload_image_part(image_part: Any) -> ImageMarkdown:
+    extension = image_extension_from_partname(getattr(image_part, "partname", ""))
+    return upload_image_bytes(getattr(image_part, "blob", b""), extension)
+
+
+def _combine_text_and_images(text: str, image_markdown: List[str]) -> str:
+    parts = []
+    if text:
+        parts.append(text)
+    parts.extend(image_markdown)
+    return "\n".join(parts).strip()
