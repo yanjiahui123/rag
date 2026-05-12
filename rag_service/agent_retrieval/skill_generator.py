@@ -137,7 +137,7 @@ Then run:
 python .opencode/skills/kb-retrieval/scripts/kb_retrieval_request.py
 ```
 
-Read the returned titles, snippets, scores, document handles, section handles, table handles, and block identifiers.
+Read the returned titles, snippets, scores, short OBS-key document handles, section handles, table handles, and block identifiers.
 
 2. Treat returned slices as candidate evidence. If a slice needs surrounding context, edit `request.json` with the returned handle:
 
@@ -234,7 +234,7 @@ Body:
 {"uid": "employee-id", "query": "question", "kb_sn_list": ["kb-1"], "top_k": 20}
 ```
 
-Returns ranked slices with document metadata, location metadata, action flags, and opaque handles.
+Returns ranked slices with document metadata, location metadata, action flags, and short OBS-key handles.
 
 ## `POST /get_document_outline`
 
@@ -244,7 +244,7 @@ Body:
 {"uid": "employee-id", "document_handle": "..."}
 ```
 
-Returns sections and tables discovered from the document manifest.
+Returns sections and tables discovered from the document manifest. `document_handle` is a `.../manifest.json` OBS key.
 
 ## `POST /get_section`
 
@@ -254,7 +254,7 @@ Body:
 {"uid": "employee-id", "section_handle": "...", "max_chars": 12000}
 ```
 
-Returns section markdown text.
+Returns section markdown text. `section_handle` is a `.../sections/<section>.md` OBS key.
 
 ## `POST /get_table`
 
@@ -264,7 +264,7 @@ Body:
 {"uid": "employee-id", "table_handle": "...", "mode": "llm_text"}
 ```
 
-Modes: `llm_text`, `json`, `html`, `summary`.
+Modes: `llm_text`, `json`, `html`, `summary`. `table_handle` is a `.../tables/<table>.llm.md` OBS key; sibling `.json` and `.html` artifacts are derived from it when those modes are requested.
 
 ## `POST /get_original_text`
 

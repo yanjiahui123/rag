@@ -6,7 +6,6 @@ from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Type
 
 from pydantic import BaseModel
 
-from rag_service.agent_retrieval.handles import AgentRetrievalHandleCodec
 from rag_service.agent_retrieval.models import (
     DocumentOutlineRequest,
     DocumentOutlineResponse,
@@ -39,6 +38,8 @@ ARTIFACT_METADATA_KEYS = (
     "structured_markdown",
     "parsed_markdown",
 )
+DOCUMENT_ARTIFACT_FILES = ("manifest.json", "document.md")
+TABLE_ARTIFACT_SUFFIXES = (".llm.md", ".json", ".html")
 
 T = TypeVar("T", bound=BaseModel)
 Retriever = Callable[[SearchSlicesRequest, str, Any], Iterable[Any]]
@@ -50,12 +51,9 @@ class AgentRetrievalService:
         self,
         retrieve_documents: Optional[Retriever] = None,
         artifact_text_resolver: Optional[ArtifactTextResolver] = None,
-        handle_secret: Optional[str] = None,
-        handle_codec: Optional[AgentRetrievalHandleCodec] = None,
     ):
         self.retrieve_documents = retrieve_documents or _default_retrieve_documents
         self.artifact_text_resolver = artifact_text_resolver or _default_artifact_text_resolver
-        self.handle_codec = handle_codec or AgentRetrievalHandleCodec(secret=handle_secret)
 
     def search_slices(
         self,
@@ -176,9 +174,9 @@ class AgentRetrievalService:
         section_payload = _section_payload(doc, metadata)
         table_payload = _table_payload(doc, metadata)
         handles = SliceHandles(
-            document_handle=self._encode(document_payload, uid) if document_payload else None,
-            section_handle=self._encode(section_payload, uid) if section_payload else None,
-            table_handle=self._encode(table_payload, uid) if table_payload else None,
+            document_handle=_obs_handle(document_payload),
+            section_handle=_obs_handle(section_payload),
+            table_handle=_obs_handle(table_payload),
         )
         actions = SliceActions(
             can_get_section=handles.section_handle is not None,
@@ -213,7 +211,7 @@ class AgentRetrievalService:
             title=_optional_string(section.get("title")),
             headers=_clean_string_list(section.get("headers")),
             block_count=len(section.get("block_ids") or []),
-            section_handle=self._encode(payload, uid),
+            section_handle=_obs_handle(payload),
         )
 
     def _outline_table(self, table_id: str, blocks: List[Dict[str, Any]], uid: str) -> OutlineTable:
@@ -223,7 +221,7 @@ class AgentRetrievalService:
             table_id=table_id,
             title=_optional_string(block.get("title")),
             row_count=_optional_int(block.get("row_count")),
-            table_handle=self._encode(payload, uid) if payload else None,
+            table_handle=_obs_handle(payload),
         )
 
     def _table_content(self, payload: Dict[str, Any], mode: str) -> str:
@@ -252,11 +250,10 @@ class AgentRetrievalService:
         text = self.artifact_text_resolver(ref)
         return text or ""
 
-    def _encode(self, payload: Dict[str, Any], uid: str) -> str:
-        return self.handle_codec.encode(payload, uid)
-
     def _decode_expected(self, handle: str, uid: str, kind: str) -> Dict[str, Any]:
-        payload = self.handle_codec.decode(handle, expected_uid=uid)
+        payload = _obs_payload(handle, kind)
+        if payload is None:
+            raise PermissionError("invalid retrieval handle")
         if payload.get("kind") != kind:
             raise PermissionError("retrieval handle has the wrong kind")
         return payload
@@ -475,6 +472,99 @@ def _table_payload_from_block(block: Dict[str, Any]) -> Dict[str, Any]:
     return {key: value for key, value in payload.items() if value is not None}
 
 
+def _obs_handle(payload: Optional[Dict[str, Any]]) -> Optional[str]:
+    if not payload:
+        return None
+    kind = payload.get("kind")
+    if kind == "document":
+        return _optional_string(payload.get("manifest_key")) or _optional_string(payload.get("document_markdown_key"))
+    if kind == "section":
+        return _optional_string(payload.get("section_ref"))
+    if kind == "table":
+        return (
+            _optional_string(payload.get("llm_table_ref"))
+            or _optional_string(payload.get("table_json_ref"))
+            or _optional_string(payload.get("display_ref"))
+        )
+    return None
+
+
+def _obs_payload(handle: str, kind: str) -> Optional[Dict[str, Any]]:
+    object_key = (handle or "").strip()
+    parts = _structured_artifact_key_parts(object_key)
+    if parts is None:
+        return None
+    if kind == "document":
+        return _document_obs_payload(object_key, parts)
+    if kind == "section":
+        return _section_obs_payload(object_key, parts)
+    if kind == "table":
+        return _table_obs_payload(object_key, parts)
+    return None
+
+
+def _structured_artifact_key_parts(object_key: str) -> Optional[List[str]]:
+    if not object_key or "\\" in object_key:
+        return None
+    parts = object_key.split("/")
+    if len(parts) < 3 or parts[1] not in ARTIFACT_METADATA_KEYS:
+        return None
+    if any(part in ("", ".", "..") for part in parts):
+        return None
+    return parts
+
+
+def _document_obs_payload(object_key: str, parts: List[str]) -> Optional[Dict[str, Any]]:
+    if len(parts) != 3 or parts[2] not in DOCUMENT_ARTIFACT_FILES:
+        return None
+    prefix = _document_artifact_prefix(object_key)
+    return {
+        "kind": "document",
+        "doc_id": parts[0],
+        "manifest_key": prefix + "manifest.json",
+        "document_markdown_key": prefix + "document.md",
+    }
+
+
+def _section_obs_payload(object_key: str, parts: List[str]) -> Optional[Dict[str, Any]]:
+    if len(parts) != 4 or parts[2] != "sections" or not parts[3].endswith(".md"):
+        return None
+    return {
+        "kind": "section",
+        "doc_id": parts[0],
+        "section_id": parts[3][:-3],
+        "section_ref": object_key,
+    }
+
+
+def _table_obs_payload(object_key: str, parts: List[str]) -> Optional[Dict[str, Any]]:
+    if len(parts) != 4 or parts[2] != "tables":
+        return None
+    stem = _table_ref_stem(object_key)
+    if stem is None:
+        return None
+    table_id = stem.rsplit("/", 1)[-1]
+    return {
+        "kind": "table",
+        "doc_id": parts[0],
+        "table_id": table_id,
+        "display_ref": stem + ".html",
+        "table_json_ref": stem + ".json",
+        "llm_table_ref": stem + ".llm.md",
+    }
+
+
+def _document_artifact_prefix(object_key: str) -> str:
+    return object_key.rsplit("/", 1)[0] + "/"
+
+
+def _table_ref_stem(object_key: str) -> Optional[str]:
+    for suffix in TABLE_ARTIFACT_SUFFIXES:
+        if object_key.endswith(suffix):
+            return object_key[: -len(suffix)]
+    return None
+
+
 def _section_ref_from_manifest(manifest: Dict[str, Any], section_id: Optional[str]) -> Optional[str]:
     for section in manifest.get("sections") or []:
         if isinstance(section, dict) and section.get("section_id") == section_id:
@@ -566,4 +656,3 @@ def _clean_string_list(value: Any) -> List[str]:
     if not isinstance(value, list):
         return []
     return [str(item) for item in value if item]
-
