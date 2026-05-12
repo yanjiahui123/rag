@@ -70,7 +70,7 @@ def _install_vectorstore_import_stubs():
         "rag_service.telemetry.collect_answer_info",
         types.ModuleType("rag_service.telemetry.collect_answer_info"),
     )
-    collect_answer_info.collect_time_use_info = lambda func: func
+    collect_answer_info.collect_time_use_info = identity_decorator
     sys.modules["rag_service.telemetry"] = telemetry
     sys.modules["rag_service.telemetry.collect_answer_info"] = collect_answer_info
 
@@ -88,6 +88,10 @@ def _install_vectorstore_import_stubs():
     enums.QueryStrategy = type("QueryStrategy", (), {"HYBRID_QUERY": "HYBRID_QUERY"})
     enums.VectorStoreType = VectorStoreType
     sys.modules["rag_service.models.enums"] = enums
+
+
+def identity_decorator(func):
+    return func
 
 
 def _find_class_method(tree, class_name, method_name):

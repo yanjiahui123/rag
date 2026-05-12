@@ -1,4 +1,5 @@
 import json
+import posixpath
 import unittest
 
 from tests.pydantic_stub import install_pydantic_stub
@@ -77,7 +78,7 @@ class StructuredArtifactsTests(unittest.TestCase):
         self.assertIn("doc-1/structured_docx/document.md", uploaded)
         self.assertIn("doc-1/structured_docx/manifest.json", uploaded)
         self.assertIn("doc-1/structured_docx/tables/table_001.html", uploaded)
-        manifest = json.loads(uploaded["doc-1/structured_docx/manifest.json"])
+        manifest = _uploaded_json(uploaded, "doc-1/structured_docx/manifest.json")
         self.assertEqual(
             manifest["blocks"][1]["display_ref"],
             "doc-1/structured_docx/tables/table_001.html",
@@ -250,7 +251,7 @@ class StructuredArtifactsTests(unittest.TestCase):
         )
 
         self.assertEqual(summary["artifact_prefix"], "doc-1/structured_markdown/")
-        self.assertEqual(uploaded["doc-1/structured_markdown/document.md"], "# Title\n\nBody")
+        self.assertEqual(_uploaded_text(uploaded, "doc-1/structured_markdown/document.md"), "# Title\n\nBody")
         self.assertIn("doc-1/structured_markdown/manifest.json", uploaded)
         self.assertIn(STRUCTURED_MARKDOWN_METADATA_KEY, parsed_document.metadata)
         self.assertNotIn(STRUCTURED_MARKDOWN_ARTIFACTS_KEY, parsed_document.metadata)
@@ -262,72 +263,15 @@ class StructuredArtifactsTests(unittest.TestCase):
         )
 
     def test_persist_structured_artifacts_uploads_sections_for_docx_html_and_markdown(self):
-        cases = [
-            (
-                persist_structured_docx_artifacts,
-                STRUCTURED_DOCX_ARTIFACTS_KEY,
-                STRUCTURED_DOCX_METADATA_KEY,
-                "structured_docx",
-            ),
-            (
-                persist_structured_html_artifacts,
-                STRUCTURED_HTML_ARTIFACTS_KEY,
-                STRUCTURED_HTML_METADATA_KEY,
-                "structured_html",
-            ),
-            (
-                persist_structured_markdown_artifacts,
-                STRUCTURED_MARKDOWN_ARTIFACTS_KEY,
-                STRUCTURED_MARKDOWN_METADATA_KEY,
-                "structured_markdown",
-            ),
-        ]
-        for persist_func, artifacts_key, metadata_key, artifact_type in cases:
+        for case in _section_artifact_cases():
+            persist_func, artifacts_key, metadata_key, artifact_type = case
             with self.subTest(artifact_type=artifact_type):
-                uploaded = {}
-                parsed_document = ParsedDocument(
-                    blocks=[
-                        ParsedBlock(
-                            text="sales intro",
-                            metadata={"block_id": "block_001", "headers": ["Report", "Sales"], "title": "Sales"},
-                        ),
-                        ParsedBlock(
-                            text="sales detail",
-                            metadata={"block_id": "block_002", "headers": ["Report", "Sales"], "title": "Sales"},
-                        ),
-                        ParsedBlock(
-                            text="ops note",
-                            metadata={"block_id": "block_003", "headers": ["Report", "Ops"], "title": "Ops"},
-                        ),
-                    ],
-                    metadata={artifacts_key: {"document_markdown": "full document", "tables": []}},
+                uploaded, parsed_document, summary = _persist_section_artifact_case(
+                    persist_func,
+                    artifacts_key,
                 )
 
-                summary = persist_func(
-                    parsed_document,
-                    "kb",
-                    "asset",
-                    "doc-1",
-                    upload_content=lambda key, content: uploaded.setdefault(key, content) or key,
-                )
-
-                manifest = json.loads(uploaded[f"doc-1/{artifact_type}/manifest.json"])
-                self.assertEqual(summary["artifact_prefix"], f"doc-1/{artifact_type}/")
-                self.assertIn(metadata_key, parsed_document.metadata)
-                self.assertEqual(len(manifest["sections"]), 2)
-                self.assertEqual(manifest["sections"][0]["section_id"], "section_001")
-                self.assertEqual(manifest["sections"][0]["headers"], ["Report", "Sales"])
-                self.assertEqual(manifest["sections"][0]["block_ids"], ["block_001", "block_002"])
-                self.assertEqual(
-                    manifest["sections"][0]["section_ref"],
-                    f"doc-1/{artifact_type}/sections/section_001.md",
-                )
-                self.assertEqual(uploaded[f"doc-1/{artifact_type}/sections/section_001.md"], "sales intro\n\nsales detail")
-                self.assertEqual(parsed_document.blocks[0].metadata["section_id"], "section_001")
-                self.assertEqual(
-                    parsed_document.blocks[0].metadata["section_ref"],
-                    f"doc-1/{artifact_type}/sections/section_001.md",
-                )
+                _assert_section_artifact_upload(self, uploaded, parsed_document, summary, metadata_key, artifact_type)
 
     def test_persist_parsed_markdown_artifact_uploads_joined_blocks(self):
         uploaded = {}
@@ -348,7 +292,7 @@ class StructuredArtifactsTests(unittest.TestCase):
 
         self.assertEqual(summary["artifact_prefix"], "doc-1/parsed_markdown/")
         self.assertEqual(summary["document_markdown_key"], "doc-1/parsed_markdown/document.md")
-        self.assertEqual(uploaded["doc-1/parsed_markdown/document.md"], "first\n\nsecond")
+        self.assertEqual(_uploaded_text(uploaded, "doc-1/parsed_markdown/document.md"), "first\n\nsecond")
         self.assertEqual(parsed_document.metadata[PARSED_MARKDOWN_METADATA_KEY], summary)
         self.assertEqual(
             extract_parsed_markdown_artifact_prefix(
@@ -356,6 +300,82 @@ class StructuredArtifactsTests(unittest.TestCase):
             ),
             summary["artifact_prefix"],
         )
+
+
+def _uploaded_text(uploaded, key):
+    value = uploaded.get(key)
+    if value is None:
+        raise AssertionError(f"Missing uploaded artifact: {key}")
+    return value
+
+
+def _uploaded_json(uploaded, key):
+    return json.loads(_uploaded_text(uploaded, key))
+
+
+def _section_artifact_cases():
+    return [
+        (
+            persist_structured_docx_artifacts,
+            STRUCTURED_DOCX_ARTIFACTS_KEY,
+            STRUCTURED_DOCX_METADATA_KEY,
+            "structured_docx",
+        ),
+        (
+            persist_structured_html_artifacts,
+            STRUCTURED_HTML_ARTIFACTS_KEY,
+            STRUCTURED_HTML_METADATA_KEY,
+            "structured_html",
+        ),
+        (
+            persist_structured_markdown_artifacts,
+            STRUCTURED_MARKDOWN_ARTIFACTS_KEY,
+            STRUCTURED_MARKDOWN_METADATA_KEY,
+            "structured_markdown",
+        ),
+    ]
+
+
+def _persist_section_artifact_case(persist_func, artifacts_key):
+    uploaded = {}
+    parsed_document = _section_artifact_document(artifacts_key)
+    summary = persist_func(
+        parsed_document,
+        "kb",
+        "asset",
+        "doc-1",
+        upload_content=lambda key, content: uploaded.setdefault(key, content) or key,
+    )
+    return uploaded, parsed_document, summary
+
+
+def _section_artifact_document(artifacts_key):
+    return ParsedDocument(
+        blocks=[
+            ParsedBlock(text="sales intro", metadata={"block_id": "block_001", "headers": ["Report", "Sales"], "title": "Sales"}),
+            ParsedBlock(text="sales detail", metadata={"block_id": "block_002", "headers": ["Report", "Sales"], "title": "Sales"}),
+            ParsedBlock(text="ops note", metadata={"block_id": "block_003", "headers": ["Report", "Ops"], "title": "Ops"}),
+        ],
+        metadata={artifacts_key: {"document_markdown": "full document", "tables": []}},
+    )
+
+
+def _assert_section_artifact_upload(test_case, uploaded, parsed_document, summary, metadata_key, artifact_type):
+    manifest_key = posixpath.join("doc-1", artifact_type, "manifest.json")
+    section_key = posixpath.join("doc-1", artifact_type, "sections", "section_001.md")
+    manifest = _uploaded_json(uploaded, manifest_key)
+    sections = manifest.get("sections") or []
+    first_section = sections[0]
+    test_case.assertEqual(summary["artifact_prefix"], f"doc-1/{artifact_type}/")
+    test_case.assertIn(metadata_key, parsed_document.metadata)
+    test_case.assertEqual(len(sections), 2)
+    test_case.assertEqual(first_section.get("section_id"), "section_001")
+    test_case.assertEqual(first_section.get("headers"), ["Report", "Sales"])
+    test_case.assertEqual(first_section.get("block_ids"), ["block_001", "block_002"])
+    test_case.assertEqual(first_section.get("section_ref"), posixpath.join("doc-1", artifact_type, "sections", "section_001.md"))
+    test_case.assertEqual(_uploaded_text(uploaded, section_key), "sales intro\n\nsales detail")
+    test_case.assertEqual(parsed_document.blocks[0].metadata["section_id"], "section_001")
+    test_case.assertEqual(parsed_document.blocks[0].metadata["section_ref"], section_key)
 
 
 if __name__ == "__main__":

@@ -2,7 +2,12 @@ import unittest
 import threading
 import ast
 import json
+import posixpath
 from pathlib import Path
+
+from tests.pydantic_stub import install_pydantic_stub
+
+install_pydantic_stub()
 
 
 class FakeRetrieveMetadata:
@@ -117,111 +122,19 @@ class EvidencePackageTests(unittest.TestCase):
             build_evidence_packages,
         )
 
-        structured_excel = {
-            "artifact_prefix": "doc-1/structured_excel/",
-            "document_markdown_key": "doc-1/structured_excel/document.md",
-            "manifest_key": "doc-1/structured_excel/manifest.json",
-            "table_count": 1,
-            "block_count": 3,
-        }
-        candidates = [
-            FakeRetrievedDocument(
-                "table evidence high",
-                "sales.xlsx",
-                0.91,
-                {
-                    "kb_sn": "kb-1",
-                    "asset_name": "asset-sales",
-                    "doc_id": "doc-1",
-                    "title": "Sales Report",
-                    "block_type": "table",
-                    "block_id": "table_001_chunk_001",
-                    "table_id": "table_001",
-                    "headers": ["Sales", "Q1"],
-                    "display_ref": "doc-1/structured_excel/tables/table_001.html",
-                    "table_json_ref": "doc-1/structured_excel/tables/table_001.json",
-                    "llm_table_ref": "doc-1/structured_excel/tables/table_001.llm.md",
-                    "structured_excel": structured_excel,
-                },
-                es_index="idx-a",
-                es_doc_id="es-1",
-            ),
-            FakeRetrievedDocument(
-                "duplicate lower table evidence",
-                "sales.xlsx",
-                0.63,
-                {
-                    "kb_sn": "kb-1",
-                    "asset_name": "asset-sales",
-                    "doc_id": "doc-1",
-                    "block_type": "table",
-                    "block_id": "table_001_chunk_002",
-                    "table_id": "table_001",
-                    "structured_excel": structured_excel,
-                },
-            ),
-            FakeRetrievedDocument(
-                "nearby text evidence",
-                "sales.xlsx",
-                0.72,
-                {
-                    "kb_sn": "kb-1",
-                    "asset_name": "asset-sales",
-                    "doc_id": "doc-1",
-                    "block_type": "text",
-                    "block_id": "block_002",
-                    "headers": ["Sales"],
-                    "structured_excel": structured_excel,
-                },
-            ),
-            FakeRetrievedDocument(
-                "other doc evidence",
-                "ops.md",
-                0.5,
-                {"kb_sn": "kb-1", "asset_name": "asset-ops", "doc_id": "doc-2", "block_id": "block_001"},
-            ),
-        ]
-
         response = build_evidence_packages(
             query="q",
             rewrite_query="rewritten q",
-            documents=candidates,
+            documents=_grouped_artifact_candidates(),
             options=EvidencePackageOptions(
                 package_top_k=2,
                 max_evidence_per_package=2,
                 artifact_mode="signed_url",
             ),
-            artifact_url_resolver=lambda key: "signed://" + key,
+            artifact_url_resolver=_signed_artifact_url,
         )
 
-        self.assertEqual(response.query, "q")
-        self.assertEqual(response.rewrite_query, "rewritten q")
-        self.assertEqual(len(response.packages), 2)
-        package = response.packages[0]
-        self.assertEqual(package.doc_id, "doc-1")
-        self.assertEqual(package.title, "Sales Report")
-        self.assertEqual(package.artifacts.document.artifact_prefix, "doc-1/structured_excel/")
-        self.assertEqual(
-            package.artifacts.document.document_markdown,
-            "signed://doc-1/structured_excel/document.md",
-        )
-        self.assertEqual(
-            package.artifacts.document.manifest,
-            "signed://doc-1/structured_excel/manifest.json",
-        )
-        self.assertEqual([item.table_id for item in package.evidence], ["table_001", None])
-        self.assertEqual(package.evidence[0].text, "table evidence high")
-        self.assertEqual(
-            package.artifacts.tables[0].refs["display"],
-            "signed://doc-1/structured_excel/tables/table_001.html",
-        )
-        self.assertEqual(package.evidence[0].es_index, "idx-a")
-        self.assertEqual(package.evidence[0].es_doc_id, "es-1")
-        response_dict = response.to_dict()
-        self.assertNotIn("artifact_summary", response_dict["packages"][0])
-        self.assertNotIn("table_contexts", response_dict["packages"][0])
-        self.assertNotIn("expansions", response_dict["packages"][0])
-        self.assertNotIn("refs", response_dict["packages"][0]["evidence"][0])
+        _assert_grouped_artifact_response(self, response)
 
     def test_returns_key_refs_without_downloading_by_default_and_bounds_packages(self):
         from rag_service.retrieval.evidence_packages import (
@@ -267,82 +180,18 @@ class EvidencePackageTests(unittest.TestCase):
         )
 
         response = build_evidence_packages(
-            query="华东区域 Q1 收入为什么下降？",
-            rewrite_query="华东区域 Q1 收入下降的原因是什么？",
-            documents=[
-                FakeRetrievedDocument(
-                    "华东区域 Q1 收入同比下降 12%，主要原因是渠道库存消化周期拉长。",
-                    "2025经营分析报告.docx",
-                    0.92,
-                    {
-                        "doc_id": "doc-1",
-                        "title": "2025经营分析报告.docx",
-                        "block_type": "text",
-                        "block_id": "block_001",
-                        "section_id": "section_3_2",
-                        "headers": ["3.2 华东区域经营情况"],
-                    },
-                    es_index="idx-a",
-                    es_doc_id="es-text",
-                ),
-                FakeRetrievedDocument(
-                    "季度: Q1\n收入: 8800万\n同比: -12%\n主要原因: 渠道库存消化、新客户延迟、折扣提升",
-                    "2025经营分析报告.docx",
-                    0.9,
-                    {
-                        "doc_id": "doc-1",
-                        "title": "华东区域季度收入",
-                        "block_type": "table",
-                        "block_id": "table_001_chunk_001",
-                        "table_id": "table_001",
-                        "row_range": [0, 1],
-                        "table": {"title": "华东区域季度收入", "row_count": 2},
-                        "display_ref": "doc-1/structured_docx/tables/table_001.html",
-                        "table_json_ref": "doc-1/structured_docx/tables/table_001.json",
-                        "llm_table_ref": "doc-1/structured_docx/tables/table_001.llm.md",
-                    },
-                    es_index="idx-a",
-                    es_doc_id="es-table",
-                ),
-            ],
+            query=_ANSWER_QUERY,
+            rewrite_query=_ANSWER_REWRITE_QUERY,
+            documents=_answer_evidence_documents(),
             options=EvidencePackageOptions(package_top_k=1, max_evidence_per_package=3),
         )
 
         api_response = to_answer_evidence_response(
             response,
-            artifact_url_builder=lambda ref: "/kb/evidence_artifacts/" + ref.replace("/", "_"),
+            artifact_url_builder=_evidence_artifact_test_url,
         )
 
-        self.assertEqual(api_response["query"], "华东区域 Q1 收入为什么下降？")
-        self.assertEqual(api_response["rewrite_query"], "华东区域 Q1 收入下降的原因是什么？")
-        self.assertEqual(
-            [(item["context_id"], item["source_id"], item["content_type"]) for item in api_response["llm_context"]],
-            [("C1", "S1", "text"), ("C2", "S1", "table")],
-        )
-        self.assertIn("渠道库存消化周期拉长", api_response["llm_context"][0]["content"])
-        self.assertIn("同比: -12%", api_response["llm_context"][1]["content"])
-
-        source = api_response["display_sources"][0]
-        self.assertEqual(source["source_id"], "S1")
-        self.assertEqual(source["title"], "2025经营分析报告.docx")
-        self.assertEqual([item["type"] for item in source["items"]], ["text", "table"])
-        self.assertEqual(source["items"][0]["context_id"], "C1")
-        self.assertEqual(source["items"][1]["context_id"], "C2")
-        self.assertEqual(
-            source["items"][1]["display"],
-            {
-                "mode": "url",
-                "url": "/kb/evidence_artifacts/doc-1_structured_docx_tables_table_001.html",
-            },
-        )
-        self.assertEqual(source["items"][1]["hit_row_ranges"], [[0, 1]])
-
-        serialized = json.dumps(api_response, ensure_ascii=False)
-        self.assertNotIn("display_ref", serialized)
-        self.assertNotIn("table_json_ref", serialized)
-        self.assertNotIn("llm_table_ref", serialized)
-        self.assertNotIn("block_001", serialized)
-        self.assertNotIn("idx-a", serialized)
+        _assert_answer_evidence_response(self, api_response)
 
     def test_agent_evidence_response_exposes_original_candidate_slices(self):
         from rag_service.retrieval.evidence_packages import (
@@ -354,72 +203,13 @@ class EvidencePackageTests(unittest.TestCase):
         response = build_evidence_packages(
             query="q",
             rewrite_query="rewritten q",
-            documents=[
-                FakeRetrievedDocument(
-                    "first matched table row",
-                    "sales.xlsx",
-                    0.91,
-                    {
-                        "doc_id": "doc-1",
-                        "title": "Sales Report",
-                        "block_type": "table",
-                        "block_id": "table_001_chunk_001",
-                        "block_index": 3,
-                        "table_id": "table_001",
-                        "row_range": [0, 20],
-                        "table": {"title": "Quarterly Sales", "row_count": 120},
-                        "display_ref": "doc-1/structured_excel/tables/table_001.html",
-                        "table_json_ref": "doc-1/structured_excel/tables/table_001.json",
-                        "llm_table_ref": "doc-1/structured_excel/tables/table_001.llm.md",
-                    },
-                    es_index="idx-sales",
-                    es_doc_id="es-table-1",
-                ),
-                FakeRetrievedDocument(
-                    "nearby explanation",
-                    "sales.xlsx",
-                    0.82,
-                    {
-                        "doc_id": "doc-1",
-                        "title": "Sales Report",
-                        "block_type": "text",
-                        "block_id": "block_004",
-                        "block_index": 4,
-                        "section_id": "section_sales",
-                    },
-                    es_index="idx-sales",
-                    es_doc_id="es-text-1",
-                ),
-            ],
+            documents=_agent_evidence_documents(),
             options=EvidencePackageOptions(package_top_k=1, max_evidence_per_package=1),
         )
 
         agent_response = to_agent_evidence_response(response)
 
-        package = agent_response["packages"][0]
-        self.assertEqual(package["doc_id"], "doc-1")
-        self.assertEqual(package["title"], "Sales Report")
-        self.assertEqual(len(package["evidence"]), 1)
-        self.assertEqual([item["text"] for item in package["slices"]], ["first matched table row", "nearby explanation"])
-        self.assertEqual(package["slices"][0]["slice_id"], "doc-1:table_001_chunk_001")
-        self.assertEqual(package["slices"][0]["rank"], 1)
-        self.assertEqual(package["slices"][0]["block_id"], "table_001_chunk_001")
-        self.assertEqual(package["slices"][0]["block_index"], 3)
-        self.assertEqual(package["slices"][0]["block_type"], "table")
-        self.assertEqual(package["slices"][0]["table_id"], "table_001")
-        self.assertEqual(package["slices"][0]["row_range"], (0, 20))
-        self.assertEqual(
-            package["slices"][0]["refs"],
-            {
-                "display": "doc-1/structured_excel/tables/table_001.html",
-                "table_json": "doc-1/structured_excel/tables/table_001.json",
-                "llm_table": "doc-1/structured_excel/tables/table_001.llm.md",
-            },
-        )
-        self.assertEqual(package["slices"][0]["es_index"], "idx-sales")
-        self.assertEqual(package["slices"][0]["es_doc_id"], "es-table-1")
-        self.assertEqual(package["slices"][1]["slice_id"], "doc-1:block_004")
-        self.assertEqual(package["slices"][1]["section_id"], "section_sales")
+        _assert_agent_evidence_response(self, agent_response)
 
     def test_preserves_distinct_table_chunks_from_same_table(self):
         from rag_service.retrieval.evidence_packages import (
@@ -465,69 +255,14 @@ class EvidencePackageTests(unittest.TestCase):
             build_evidence_packages,
         )
 
-        candidates = [
-            FakeRetrievedDocument(
-                "sales intro",
-                "report.md",
-                0.91,
-                {
-                    "doc_id": "doc-a",
-                    "block_id": "block_001",
-                    "block_index": 1,
-                    "block_type": "text",
-                    "headers": ["Report", "Sales"],
-                    "title": "Sales",
-                },
-            ),
-            FakeRetrievedDocument(
-                "sales detail",
-                "report.md",
-                0.9,
-                {
-                    "doc_id": "doc-a",
-                    "block_id": "block_002",
-                    "block_index": 2,
-                    "block_type": "text",
-                    "headers": ["Report", "Sales"],
-                    "title": "Sales",
-                },
-            ),
-            FakeRetrievedDocument(
-                "ops unrelated",
-                "report.md",
-                0.89,
-                {
-                    "doc_id": "doc-a",
-                    "block_id": "block_003",
-                    "block_index": 3,
-                    "block_type": "text",
-                    "headers": ["Report", "Ops"],
-                    "title": "Ops",
-                },
-            ),
-        ]
-
         response = build_evidence_packages(
             query="sales",
             rewrite_query="sales",
-            documents=candidates,
+            documents=_related_section_candidates(),
             options=EvidencePackageOptions(package_top_k=1, max_evidence_per_package=2),
         )
 
-        package = response.packages[0]
-        section_artifact = package.artifacts.sections[0]
-        self.assertEqual(section_artifact.type, "section")
-        self.assertEqual(section_artifact.mode, "merged_section")
-        self.assertEqual(section_artifact.title, "Sales")
-        self.assertEqual(section_artifact.headers, ["Report", "Sales"])
-        self.assertEqual(section_artifact.hit_blocks, 2)
-        self.assertEqual(section_artifact.merged_block_ids, ["block_001", "block_002"])
-        self.assertEqual(package.evidence[0].evidence_type, "section")
-        self.assertEqual(package.evidence[0].mode, "merged_section")
-        self.assertEqual(package.evidence[0].headers, ["Report", "Sales"])
-        self.assertEqual(package.evidence[0].merged_block_ids, ["block_001", "block_002"])
-        self.assertEqual(package.evidence[0].text, "sales intro\n\nsales detail")
-        self.assertEqual(package.evidence[1].text, "ops unrelated")
+        _assert_related_section_package(self, response.packages[0])
 
     def test_merged_document_section_uses_section_artifact_text_when_available(self):
         from rag_service.retrieval.evidence_packages import (
@@ -754,72 +489,22 @@ class EvidencePackageTests(unittest.TestCase):
             build_evidence_packages,
         )
 
-        table_summary = {
-            "table_id": "table_001",
-            "title": "Sales detail",
-            "row_count": 10,
-            "col_count": 2,
-        }
-        candidates = [
-            FakeRetrievedDocument(
-                f"row chunk {index}",
-                "sales.xlsx",
-                0.9 - index * 0.01,
-                {
-                    "doc_id": "doc-a",
-                    "block_id": f"table_001_chunk_{index + 1:03d}",
-                    "table_id": "table_001",
-                    "row_range": (index, index + 1),
-                    "table": table_summary,
-                    "display_ref": "doc-a/structured_excel/tables/table_001.html",
-                    "table_json_ref": "doc-a/structured_excel/tables/table_001.json",
-                    "llm_table_ref": "doc-a/structured_excel/tables/table_001.llm.md",
-                },
-            )
-            for index in range(4)
-        ]
-
         response = build_evidence_packages(
             query="sales detail",
             rewrite_query="sales detail",
-            documents=candidates,
+            documents=_covered_table_chunk_candidates(),
             options=EvidencePackageOptions(
                 package_top_k=1,
                 max_evidence_per_package=2,
                 table_expand_ratio_threshold=0.4,
                 max_inline_table_chars=100,
             ),
-            artifact_text_resolver=lambda key: "FULL TABLE TEXT" if key.endswith(".llm.md") else "",
+            artifact_text_resolver=_covered_table_text,
         )
 
         package = response.packages[0]
-        self.assertEqual(len(package.evidence), 1)
-        self.assertEqual(package.evidence[0].text, "FULL TABLE TEXT")
-        self.assertEqual(package.evidence[0].mode, "full_table_inline")
-        self.assertEqual(package.evidence[0].table_id, "table_001")
-        self.assertEqual(package.evidence[0].hit_ratio, 0.4)
-        self.assertEqual(package.evidence[0].hit_rows, 4)
-        self.assertEqual(package.evidence[0].hit_row_ranges, [[0, 4]])
-        self.assertEqual(package.evidence[0].row_count, 10)
-        self.assertEqual(
-            package.evidence[0].merged_block_ids,
-            [
-                "table_001_chunk_001",
-                "table_001_chunk_002",
-                "table_001_chunk_003",
-                "table_001_chunk_004",
-            ],
-        )
-        table_artifact = package.artifacts.tables[0]
-        self.assertEqual(table_artifact.type, "table")
-        self.assertEqual(table_artifact.mode, "full_table_inline")
-        self.assertEqual(table_artifact.table_id, "table_001")
-        self.assertEqual(table_artifact.hit_row_ranges, [[0, 4]])
-        self.assertEqual(table_artifact.hit_rows, 4)
-        self.assertEqual(table_artifact.row_count, 10)
-        self.assertEqual(table_artifact.hit_ratio, 0.4)
-        self.assertEqual(table_artifact.refs["table_json"], "doc-a/structured_excel/tables/table_001.json")
-        self.assertTrue(table_artifact.expanded)
+        _assert_inline_table_evidence(self, package.evidence)
+        _assert_inline_table_artifact(self, package.artifacts.tables[0])
 
     def test_does_not_expand_table_when_hit_ratio_is_below_threshold(self):
         from rag_service.retrieval.evidence_packages import (
@@ -1258,6 +943,359 @@ class EvidencePackageTests(unittest.TestCase):
 
         self.assertEqual(len(documents), 1)
         self.assertEqual(documents[0].score, 0.9)
+
+
+_ANSWER_QUERY = "华东区域 Q1 收入为什么下降？"
+_ANSWER_REWRITE_QUERY = "华东区域 Q1 收入下降的原因是什么？"
+
+
+def _signed_artifact_url(key):
+    return "signed://" + key
+
+
+def _evidence_artifact_test_url(ref):
+    return posixpath.join("/kb/evidence_artifacts", ref.replace("/", "_"))
+
+
+def _structured_excel_summary():
+    return {
+        "artifact_prefix": "doc-1/structured_excel/",
+        "document_markdown_key": "doc-1/structured_excel/document.md",
+        "manifest_key": "doc-1/structured_excel/manifest.json",
+        "table_count": 1,
+        "block_count": 3,
+    }
+
+
+def _grouped_artifact_candidates():
+    structured_excel = _structured_excel_summary()
+    return [
+        _grouped_table_candidate(structured_excel),
+        FakeRetrievedDocument(
+            "duplicate lower table evidence",
+            "sales.xlsx",
+            0.63,
+            _grouped_table_metadata(structured_excel, "table_001_chunk_002"),
+        ),
+        FakeRetrievedDocument("nearby text evidence", "sales.xlsx", 0.72, _grouped_text_metadata(structured_excel)),
+        FakeRetrievedDocument(
+            "other doc evidence",
+            "ops.md",
+            0.5,
+            {"kb_sn": "kb-1", "asset_name": "asset-ops", "doc_id": "doc-2", "block_id": "block_001"},
+        ),
+    ]
+
+
+def _grouped_table_candidate(structured_excel):
+    return FakeRetrievedDocument(
+        "table evidence high",
+        "sales.xlsx",
+        0.91,
+        _grouped_table_metadata(structured_excel, "table_001_chunk_001", include_refs=True),
+        es_index="idx-a",
+        es_doc_id="es-1",
+    )
+
+
+def _grouped_table_metadata(structured_excel, block_id, include_refs=False):
+    metadata = {
+        "kb_sn": "kb-1",
+        "asset_name": "asset-sales",
+        "doc_id": "doc-1",
+        "block_type": "table",
+        "block_id": block_id,
+        "table_id": "table_001",
+        "structured_excel": structured_excel,
+    }
+    if include_refs:
+        metadata.update(
+            {
+                "title": "Sales Report",
+                "headers": ["Sales", "Q1"],
+                "display_ref": "doc-1/structured_excel/tables/table_001.html",
+                "table_json_ref": "doc-1/structured_excel/tables/table_001.json",
+                "llm_table_ref": "doc-1/structured_excel/tables/table_001.llm.md",
+            }
+        )
+    return metadata
+
+
+def _grouped_text_metadata(structured_excel):
+    return {
+        "kb_sn": "kb-1",
+        "asset_name": "asset-sales",
+        "doc_id": "doc-1",
+        "block_type": "text",
+        "block_id": "block_002",
+        "headers": ["Sales"],
+        "structured_excel": structured_excel,
+    }
+
+
+def _assert_grouped_artifact_response(test_case, response):
+    test_case.assertEqual(response.query, "q")
+    test_case.assertEqual(response.rewrite_query, "rewritten q")
+    test_case.assertEqual(len(response.packages), 2)
+    package = response.packages[0]
+    test_case.assertEqual(package.doc_id, "doc-1")
+    test_case.assertEqual(package.title, "Sales Report")
+    test_case.assertEqual(package.artifacts.document.artifact_prefix, "doc-1/structured_excel/")
+    test_case.assertEqual(package.artifacts.document.document_markdown, "signed://doc-1/structured_excel/document.md")
+    test_case.assertEqual(package.artifacts.document.manifest, "signed://doc-1/structured_excel/manifest.json")
+    test_case.assertEqual([item.table_id for item in package.evidence], ["table_001", None])
+    test_case.assertEqual(package.evidence[0].text, "table evidence high")
+    test_case.assertEqual(package.artifacts.tables[0].refs["display"], "signed://doc-1/structured_excel/tables/table_001.html")
+    test_case.assertEqual(package.evidence[0].es_index, "idx-a")
+    test_case.assertEqual(package.evidence[0].es_doc_id, "es-1")
+    _assert_agent_response_hides_internal_refs(test_case, response.to_dict())
+
+
+def _assert_agent_response_hides_internal_refs(test_case, response_dict):
+    test_case.assertNotIn("artifact_summary", response_dict["packages"][0])
+    test_case.assertNotIn("table_contexts", response_dict["packages"][0])
+    test_case.assertNotIn("expansions", response_dict["packages"][0])
+    test_case.assertNotIn("refs", response_dict["packages"][0]["evidence"][0])
+
+
+def _answer_evidence_documents():
+    return [
+        FakeRetrievedDocument(
+            "华东区域 Q1 收入同比下降 12%，主要原因是渠道库存消化周期拉长。",
+            "2025经营分析报告.docx",
+            0.92,
+            {
+                "doc_id": "doc-1",
+                "title": "2025经营分析报告.docx",
+                "block_type": "text",
+                "block_id": "block_001",
+                "section_id": "section_3_2",
+                "headers": ["3.2 华东区域经营情况"],
+            },
+            es_index="idx-a",
+            es_doc_id="es-text",
+        ),
+        _answer_table_document(),
+    ]
+
+
+def _answer_table_document():
+    return FakeRetrievedDocument(
+        "季度: Q1\n收入: 8800万\n同比: -12%\n主要原因: 渠道库存消化、新客户延迟、折扣提升",
+        "2025经营分析报告.docx",
+        0.9,
+        {
+            "doc_id": "doc-1",
+            "title": "华东区域季度收入",
+            "block_type": "table",
+            "block_id": "table_001_chunk_001",
+            "table_id": "table_001",
+            "row_range": [0, 1],
+            "table": {"title": "华东区域季度收入", "row_count": 2},
+            "display_ref": "doc-1/structured_docx/tables/table_001.html",
+            "table_json_ref": "doc-1/structured_docx/tables/table_001.json",
+            "llm_table_ref": "doc-1/structured_docx/tables/table_001.llm.md",
+        },
+        es_index="idx-a",
+        es_doc_id="es-table",
+    )
+
+
+def _assert_answer_evidence_response(test_case, api_response):
+    test_case.assertEqual(api_response["query"], _ANSWER_QUERY)
+    test_case.assertEqual(api_response["rewrite_query"], _ANSWER_REWRITE_QUERY)
+    test_case.assertEqual(
+        [(item["context_id"], item["source_id"], item["content_type"]) for item in api_response["llm_context"]],
+        [("C1", "S1", "text"), ("C2", "S1", "table")],
+    )
+    test_case.assertIn("渠道库存消化周期拉长", api_response["llm_context"][0]["content"])
+    test_case.assertIn("同比: -12%", api_response["llm_context"][1]["content"])
+    _assert_answer_display_source(test_case, api_response["display_sources"][0])
+    serialized = json.dumps(api_response, ensure_ascii=False)
+    for hidden_value in ("display_ref", "table_json_ref", "llm_table_ref", "block_001", "idx-a"):
+        test_case.assertNotIn(hidden_value, serialized)
+
+
+def _assert_answer_display_source(test_case, source):
+    test_case.assertEqual(source["source_id"], "S1")
+    test_case.assertEqual(source["title"], "2025经营分析报告.docx")
+    test_case.assertEqual([item["type"] for item in source["items"]], ["text", "table"])
+    test_case.assertEqual(source["items"][0]["context_id"], "C1")
+    test_case.assertEqual(source["items"][1]["context_id"], "C2")
+    test_case.assertEqual(
+        source["items"][1]["display"],
+        {"mode": "url", "url": "/kb/evidence_artifacts/doc-1_structured_docx_tables_table_001.html"},
+    )
+    test_case.assertEqual(source["items"][1]["hit_row_ranges"], [[0, 1]])
+
+
+def _agent_evidence_documents():
+    return [
+        FakeRetrievedDocument(
+            "first matched table row",
+            "sales.xlsx",
+            0.91,
+            _agent_table_metadata(),
+            es_index="idx-sales",
+            es_doc_id="es-table-1",
+        ),
+        FakeRetrievedDocument(
+            "nearby explanation",
+            "sales.xlsx",
+            0.82,
+            {
+                "doc_id": "doc-1",
+                "title": "Sales Report",
+                "block_type": "text",
+                "block_id": "block_004",
+                "block_index": 4,
+                "section_id": "section_sales",
+            },
+            es_index="idx-sales",
+            es_doc_id="es-text-1",
+        ),
+    ]
+
+
+def _agent_table_metadata():
+    return {
+        "doc_id": "doc-1",
+        "title": "Sales Report",
+        "block_type": "table",
+        "block_id": "table_001_chunk_001",
+        "block_index": 3,
+        "table_id": "table_001",
+        "row_range": [0, 20],
+        "table": {"title": "Quarterly Sales", "row_count": 120},
+        "display_ref": "doc-1/structured_excel/tables/table_001.html",
+        "table_json_ref": "doc-1/structured_excel/tables/table_001.json",
+        "llm_table_ref": "doc-1/structured_excel/tables/table_001.llm.md",
+    }
+
+
+def _assert_agent_evidence_response(test_case, agent_response):
+    package = agent_response["packages"][0]
+    test_case.assertEqual(package["doc_id"], "doc-1")
+    test_case.assertEqual(package["title"], "Sales Report")
+    test_case.assertEqual(len(package["evidence"]), 1)
+    test_case.assertEqual([item["text"] for item in package["slices"]], ["first matched table row", "nearby explanation"])
+    _assert_agent_table_slice(test_case, package["slices"][0])
+    test_case.assertEqual(package["slices"][1]["slice_id"], "doc-1:block_004")
+    test_case.assertEqual(package["slices"][1]["section_id"], "section_sales")
+
+
+def _assert_agent_table_slice(test_case, table_slice):
+    test_case.assertEqual(table_slice["slice_id"], "doc-1:table_001_chunk_001")
+    test_case.assertEqual(table_slice["rank"], 1)
+    test_case.assertEqual(table_slice["block_id"], "table_001_chunk_001")
+    test_case.assertEqual(table_slice["block_index"], 3)
+    test_case.assertEqual(table_slice["block_type"], "table")
+    test_case.assertEqual(table_slice["table_id"], "table_001")
+    test_case.assertEqual(table_slice["row_range"], (0, 20))
+    test_case.assertEqual(
+        table_slice["refs"],
+        {
+            "display": "doc-1/structured_excel/tables/table_001.html",
+            "table_json": "doc-1/structured_excel/tables/table_001.json",
+            "llm_table": "doc-1/structured_excel/tables/table_001.llm.md",
+        },
+    )
+    test_case.assertEqual(table_slice["es_index"], "idx-sales")
+    test_case.assertEqual(table_slice["es_doc_id"], "es-table-1")
+
+
+def _related_section_candidates():
+    return [
+        FakeRetrievedDocument("sales intro", "report.md", 0.91, _section_metadata("block_001", 1, "Sales")),
+        FakeRetrievedDocument("sales detail", "report.md", 0.9, _section_metadata("block_002", 2, "Sales")),
+        FakeRetrievedDocument("ops unrelated", "report.md", 0.89, _section_metadata("block_003", 3, "Ops")),
+    ]
+
+
+def _section_metadata(block_id, block_index, title):
+    return {
+        "doc_id": "doc-a",
+        "block_id": block_id,
+        "block_index": block_index,
+        "block_type": "text",
+        "headers": ["Report", title],
+        "title": title,
+    }
+
+
+def _assert_related_section_package(test_case, package):
+    section_artifact = package.artifacts.sections[0]
+    test_case.assertEqual(section_artifact.type, "section")
+    test_case.assertEqual(section_artifact.mode, "merged_section")
+    test_case.assertEqual(section_artifact.title, "Sales")
+    test_case.assertEqual(section_artifact.headers, ["Report", "Sales"])
+    test_case.assertEqual(section_artifact.hit_blocks, 2)
+    test_case.assertEqual(section_artifact.merged_block_ids, ["block_001", "block_002"])
+    test_case.assertEqual(package.evidence[0].evidence_type, "section")
+    test_case.assertEqual(package.evidence[0].mode, "merged_section")
+    test_case.assertEqual(package.evidence[0].headers, ["Report", "Sales"])
+    test_case.assertEqual(package.evidence[0].merged_block_ids, ["block_001", "block_002"])
+    test_case.assertEqual(package.evidence[0].text, "sales intro\n\nsales detail")
+    test_case.assertEqual(package.evidence[1].text, "ops unrelated")
+
+
+def _covered_table_chunk_candidates():
+    table_summary = {"table_id": "table_001", "title": "Sales detail", "row_count": 10, "col_count": 2}
+    return [
+        FakeRetrievedDocument(
+            f"row chunk {index}",
+            "sales.xlsx",
+            0.9 - index * 0.01,
+            _covered_table_metadata(index, table_summary),
+        )
+        for index in range(4)
+    ]
+
+
+def _covered_table_metadata(index, table_summary):
+    return {
+        "doc_id": "doc-a",
+        "block_id": f"table_001_chunk_{index + 1:03d}",
+        "table_id": "table_001",
+        "row_range": (index, index + 1),
+        "table": table_summary,
+        "display_ref": "doc-a/structured_excel/tables/table_001.html",
+        "table_json_ref": "doc-a/structured_excel/tables/table_001.json",
+        "llm_table_ref": "doc-a/structured_excel/tables/table_001.llm.md",
+    }
+
+
+def _covered_table_text(key):
+    return "FULL TABLE TEXT" if key.endswith(".llm.md") else ""
+
+
+def _assert_inline_table_evidence(test_case, evidence):
+    test_case.assertEqual(len(evidence), 1)
+    table_evidence = evidence[0]
+    test_case.assertEqual(table_evidence.text, "FULL TABLE TEXT")
+    test_case.assertEqual(table_evidence.mode, "full_table_inline")
+    test_case.assertEqual(table_evidence.table_id, "table_001")
+    test_case.assertEqual(table_evidence.hit_ratio, 0.4)
+    test_case.assertEqual(table_evidence.hit_rows, 4)
+    test_case.assertEqual(table_evidence.hit_row_ranges, [[0, 4]])
+    test_case.assertEqual(table_evidence.row_count, 10)
+    test_case.assertEqual(
+        table_evidence.merged_block_ids,
+        ["table_001_chunk_001", "table_001_chunk_002", "table_001_chunk_003", "table_001_chunk_004"],
+    )
+
+
+def _assert_inline_table_artifact(test_case, table_artifact):
+    test_case.assertEqual(table_artifact.type, "table")
+    test_case.assertEqual(table_artifact.mode, "full_table_inline")
+    test_case.assertEqual(table_artifact.table_id, "table_001")
+    test_case.assertEqual(table_artifact.hit_row_ranges, [[0, 4]])
+    test_case.assertEqual(table_artifact.hit_rows, 4)
+    test_case.assertEqual(table_artifact.row_count, 10)
+    test_case.assertEqual(table_artifact.hit_ratio, 0.4)
+    test_case.assertEqual(table_artifact.refs["table_json"], "doc-a/structured_excel/tables/table_001.json")
+    test_case.assertTrue(table_artifact.expanded)
+
 
 def _class_annotation_names(tree, class_name):
     for node in ast.walk(tree):

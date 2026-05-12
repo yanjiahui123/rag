@@ -56,11 +56,15 @@ def install_fake_openpyxl_module():
     openpyxl = types.ModuleType("openpyxl")
     reader = types.ModuleType("openpyxl.reader")
     excel = types.ModuleType("openpyxl.reader.excel")
-    excel.load_workbook = lambda *args, **kwargs: FakeWorkbook()
+    excel.load_workbook = load_fake_workbook
     sys.modules["openpyxl"] = openpyxl
     sys.modules["openpyxl.reader"] = reader
     sys.modules["openpyxl.reader.excel"] = excel
     return previous_modules
+
+
+def load_fake_workbook(*args, **kwargs):
+    return FakeWorkbook()
 
 
 def restore_modules(previous_modules):
