@@ -6,6 +6,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from pydantic import BaseModel, Field
 
 CellRange = Tuple[int, int, int, int]
+EMPTY_CELL_RANGE: CellRange = (0, 0, 0, 0)
 
 
 class ExcelTableChunk(BaseModel):
@@ -282,14 +283,14 @@ def _local_merge_ranges(
         return []
     end_row, end_col = start_row + len(rows), start_col + len(rows[0])
     ranges = [_local_range(cell_range, start_row, start_col, end_row, end_col) for cell_range in merge_ranges]
-    return [cell_range for cell_range in ranges if cell_range and _is_multi_cell_range(cell_range)]
+    return [cell_range for cell_range in ranges if _is_multi_cell_range(cell_range)]
 
 
-def _local_range(cell_range: CellRange, start_row: int, start_col: int, end_row: int, end_col: int):
+def _local_range(cell_range: CellRange, start_row: int, start_col: int, end_row: int, end_col: int) -> CellRange:
     row_1, col_1, row_2, col_2 = cell_range
     clipped = max(row_1, start_row), max(col_1, start_col), min(row_2, end_row), min(col_2, end_col)
     if clipped[0] >= clipped[2] or clipped[1] >= clipped[3]:
-        return None
+        return EMPTY_CELL_RANGE
     return clipped[0] - start_row, clipped[1] - start_col, clipped[2] - start_row, clipped[3] - start_col
 
 

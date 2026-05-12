@@ -582,7 +582,7 @@ class _PackageAccumulator:
         self.source = source
         self.title = title
         self.document_artifact = document_artifact
-        self._items_by_key: Dict[Tuple[str, ...], EvidenceItem] = {}
+        self._items_by_key: Dict[Tuple[str, str, str], EvidenceItem] = {}
 
     def add(self, item: EvidenceItem) -> None:
         key = _evidence_key(item)
@@ -699,14 +699,14 @@ def _document_group_key(metadata: Dict[str, Any], source: str) -> Tuple[Optional
     return metadata.get("kb_sn"), metadata.get("asset_name"), doc_identifier
 
 
-def _evidence_key(item: EvidenceItem) -> Tuple[str, ...]:
+def _evidence_key(item: EvidenceItem) -> Tuple[str, str, str]:
     if item.table_id and item.block_id:
-        return "block", item.block_id
+        return "block", item.block_id, ""
     if item.table_id:
-        return "table", item.table_id
+        return "table", item.table_id, ""
     if item.block_id:
         return "block_text", item.block_id, item.text
-    return "text", item.text
+    return "text", item.text, ""
 
 
 def _section_artifacts(
@@ -715,12 +715,11 @@ def _section_artifacts(
     artifact_text_resolver: Optional[ArtifactTextResolver],
 ) -> List[DocumentSectionArtifact]:
     manifest = _document_manifest(document_artifact, artifact_text_resolver)
-    artifacts = [
-        artifact
-        for section_id, section_items in _group_section_items(items).items()
-        for artifact in [_section_artifact(section_id, section_items, manifest, artifact_text_resolver)]
-        if artifact is not None
-    ]
+    artifacts = []
+    for section_id, section_items in _group_section_items(items).items():
+        artifact = _section_artifact(section_id, section_items, manifest, artifact_text_resolver)
+        if artifact is not None:
+            artifacts.append(artifact)
     return sorted(artifacts, key=lambda artifact: (artifact.hit_blocks, artifact.score), reverse=True)
 
 
@@ -994,14 +993,11 @@ def _table_artifacts(
 ) -> List[TableArtifact]:
     if not options.enable_table_expansion:
         return []
-    artifacts = [
-        artifact
-        for artifact in (
-            _table_artifact(table_id, table_items, options)
-            for table_id, table_items in _group_table_items(items).items()
-        )
-        if artifact is not None
-    ]
+    artifacts = []
+    for table_id, table_items in _group_table_items(items).items():
+        artifact = _table_artifact(table_id, table_items, options)
+        if artifact is not None:
+            artifacts.append(artifact)
     artifacts = _resolve_expanded_table_artifacts(artifacts, artifact_text_resolver, options)
     return sorted(artifacts, key=lambda artifact: (artifact.expanded, artifact.hit_ratio, artifact.hit_rows), reverse=True)
 
