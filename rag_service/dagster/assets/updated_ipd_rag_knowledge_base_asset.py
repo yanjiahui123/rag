@@ -1,10 +1,9 @@
 from typing import Any, Dict
 
 from dagster import DynamicOut, DynamicOutput, In, Nothing, OpExecutionContext, RetryPolicy, graph_asset, op
-from more_itertools import chunked
 from sqlmodel import Session
 
-from rag_service.constants import DELETED_DOCUMENTS_INFO_DIR, SPLIT_SIZE, DATAOPS_OPERATION_DELETE
+from rag_service.constants import DELETED_DOCUMENTS_INFO_DIR, DATAOPS_OPERATION_DELETE
 from rag_service.dagster.dagster_common_op import (
     add_asset_documents_in_ipd_rag,
     change_vectorization_job_status_to_started,
@@ -17,6 +16,7 @@ from rag_service.dagster.dagster_common_op import (
     parse_documents_info,
     save_document_list_to_database,
 )
+from rag_service.dagster.ipd_rag_payload import send_document_entries_to_dataops
 from rag_service.dagster.partitions.knowledge_base_asset_partition import knowledge_base_asset_partitions_def
 from rag_service.database import engine
 from rag_service.utils.dagster_util import get_documents_info_root_dir, parse_asset_partition_key
@@ -54,8 +54,12 @@ def delete_asset_documents_in_ipd_rag(context: OpExecutionContext, deleted_docum
             document_entry = create_document_entry(document["document_id"], source, document["document_name"],
                                                    DATAOPS_OPERATION_DELETE)
             document_entry_list.append(document_entry)
-    for chunked_document_entry_list in chunked(document_entry_list, SPLIT_SIZE):
-        send_data_to_dataops(ipd_rag_knowledge_base_set_sn, kb_sn, chunked_document_entry_list)
+    send_document_entries_to_dataops(
+        send_data_to_dataops,
+        ipd_rag_knowledge_base_set_sn,
+        kb_sn,
+        document_entry_list,
+    )
 
 
 @graph_asset(partitions_def=knowledge_base_asset_partitions_def)

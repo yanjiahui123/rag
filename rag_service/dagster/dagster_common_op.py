@@ -34,6 +34,10 @@ from rag_service.corpus_detections.sensitive_word_detector import SensitiveWordD
 from rag_service.corpus_detections.similar_doument_detector import SimilarDocumentDetector
 from rag_service.corpus_detections.url_validation_detector import UrlValidityDetector
 from rag_service.database import engine
+from rag_service.dagster.ipd_rag_payload import (
+    send_document_entries_to_dataops,
+    split_document_entry_for_dataops,
+)
 from rag_service.document_loaders.loader import load_file, parse_file, split_parsed_file
 from rag_service.document_loaders.parsed_blocks import (
     ParsedDocument,
@@ -930,11 +934,13 @@ def _get_document_name(source: str, document_index: Dict[str, Any]) -> str:
 
 def _append_regular_document_entry(state, source, document_name, slice_list):
     document_id = str(uuid.uuid4())
-    state["source_document_list_dict"][source] = [{"document_name": document_name, "document_id": document_id}]
-    state["document_entry_list"].append(
-        create_document_entry(document_id, source, document_name, DATAOPS_OPERATION_INSERT, slice_list)
+    document_entry = create_document_entry(document_id, source, document_name, DATAOPS_OPERATION_INSERT, slice_list)
+    document_entries = split_document_entry_for_dataops(
+        document_entry,
+        document_id_factory=lambda: str(uuid.uuid4()),
     )
-    state["slice_count"] += len(slice_list)
+    state["source_document_list_dict"][source] = _document_entries_to_ipd_rag_document_list(document_entries)
+    _append_document_entries_to_state(state, document_entries)
 
 
 def _append_large_document_entries(
@@ -950,13 +956,29 @@ def _append_large_document_entries(
         ipd_rag_document_list.append({"document_name": current_document_name, "document_id": document_id})
         document_entry = create_document_entry(document_id, source, current_document_name, DATAOPS_OPERATION_INSERT,
                                                slice_list)
+        document_entries = split_document_entry_for_dataops(
+            document_entry,
+            document_id_factory=lambda: str(uuid.uuid4()),
+        )
+        ipd_rag_document_list[-1:] = _document_entries_to_ipd_rag_document_list(document_entries)
         if len(slice_list) < MAXIMUM_NUMBER_OF_SLICES:
-            state["document_entry_list"].append(document_entry)
-            state["slice_count"] += len(slice_list)
+            _append_document_entries_to_state(state, document_entries)
             break
-        send_data_to_dataops(ipd_rag_kb_sn, kb_sn, [document_entry], doc_id)
+        send_document_entries_to_dataops(send_data_to_dataops, ipd_rag_kb_sn, kb_sn, document_entries, doc_id)
         scroll_id, slice_list = es_manager.iterator_batch_search_document_data_by_source(scroll_id)
     state["source_document_list_dict"][source] = ipd_rag_document_list
+
+
+def _document_entries_to_ipd_rag_document_list(document_entries):
+    return [
+        {"document_name": document_entry["filename"], "document_id": document_entry["id"]}
+        for document_entry in document_entries
+    ]
+
+
+def _append_document_entries_to_state(state, document_entries):
+    state["document_entry_list"].extend(document_entries)
+    state["slice_count"] += sum(len(document_entry.get("slices") or []) for document_entry in document_entries)
 
 
 def _collect_source_document_entries(state, es_manager, ipd_rag_kb_sn, kb_sn, source, document_index):
@@ -966,8 +988,14 @@ def _collect_source_document_entries(state, es_manager, ipd_rag_kb_sn, kb_sn, so
     scroll_id, slice_list = es_manager.first_batch_search_document_data_by_source(
         index, source, MAXIMUM_NUMBER_OF_SLICES
     )
-    if state["slice_count"] + len(slice_list) >= MAXIMUM_NUMBER_OF_SLICES:
-        send_data_to_dataops(ipd_rag_kb_sn, kb_sn, state["document_entry_list"], doc_id)
+    if state["document_entry_list"] and state["slice_count"] + len(slice_list) >= MAXIMUM_NUMBER_OF_SLICES:
+        send_document_entries_to_dataops(
+            send_data_to_dataops,
+            ipd_rag_kb_sn,
+            kb_sn,
+            state["document_entry_list"],
+            doc_id,
+        )
         state["document_entry_list"] = []
         state["slice_count"] = 0
     if len(slice_list) < MAXIMUM_NUMBER_OF_SLICES:
@@ -998,7 +1026,13 @@ def add_asset_documents_in_ipd_rag(
             state, es_manager, ipd_rag_knowledge_base_set_sn, kb_sn, source, document_index
         )
     if state["document_entry_list"]:
-        send_data_to_dataops(ipd_rag_knowledge_base_set_sn, kb_sn, state["document_entry_list"], doc_id)
+        send_document_entries_to_dataops(
+            send_data_to_dataops,
+            ipd_rag_knowledge_base_set_sn,
+            kb_sn,
+            state["document_entry_list"],
+            doc_id,
+        )
     return state["source_document_list_dict"]
 
 
