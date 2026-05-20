@@ -30,16 +30,21 @@ class ExcelTable(BaseModel):
 
     def to_llm_chunks(self, max_chars: int = 1500, min_tail_chars: int = 300) -> List[ExcelTableChunk]:
         prefix = self._llm_prefix()
+        prefix_len = len(prefix)
         chunks = []
         current_rows = []
+        current_data_len = 0
         current_start = 0
         for row_index, row in enumerate(self.rows):
-            candidate_rows = current_rows + [self._row_text(row_index, row)]
-            if current_rows and len(prefix + "\n".join(candidate_rows)) > max_chars:
+            row_text = self._row_text(row_index, row)
+            separator_len = 1 if current_rows else 0
+            candidate_data_len = current_data_len + separator_len + len(row_text)
+            if current_rows and prefix_len + candidate_data_len > max_chars:
                 chunks.append(self._chunk(prefix, current_rows, current_start, row_index))
-                current_rows, current_start = [self._row_text(row_index, row)], row_index
+                current_rows, current_data_len, current_start = [row_text], len(row_text), row_index
             else:
-                current_rows = candidate_rows
+                current_rows.append(row_text)
+                current_data_len = candidate_data_len
         if current_rows:
             chunks.append(self._chunk(prefix, current_rows, current_start, len(self.rows)))
         return self._merge_small_tail(chunks, max_chars, min_tail_chars)

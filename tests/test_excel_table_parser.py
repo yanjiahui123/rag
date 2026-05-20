@@ -1,4 +1,5 @@
 import unittest
+import time
 
 from tests.pydantic_stub import install_pydantic_stub
 
@@ -84,6 +85,32 @@ class ExcelTableParserTests(unittest.TestCase):
             self.assertIn("- Value", chunk.text)
         self.assertEqual(chunks[-1].row_range[1], len(rows))
         self.assertGreaterEqual(len(chunks[-1].text), 80)
+
+    def test_to_chunks_scales_near_linearly_when_table_fits_one_chunk(self):
+        from rag_service.document_loaders.table.excel_parser import ExcelTable
+
+        def build_table(row_count):
+            return ExcelTable(
+                table_id="table_001",
+                source="large.xlsx",
+                sheet_name="Sheet1",
+                cell_range=f"A1:C{row_count + 1}",
+                flatten_headers=["A", "B", "C"],
+                rows=[[str(index), "x" * 20, "y" * 20] for index in range(row_count)],
+            )
+
+        def elapsed_for(row_count):
+            start = time.perf_counter()
+            chunks = build_table(row_count).to_llm_chunks(max_chars=10**9)
+            elapsed = time.perf_counter() - start
+            self.assertEqual(len(chunks), 1)
+            self.assertEqual(chunks[0].row_range, (0, row_count))
+            return elapsed
+
+        small_elapsed = elapsed_for(1000)
+        large_elapsed = elapsed_for(4000)
+
+        self.assertLess(large_elapsed, small_elapsed * 8 + 0.1)
 
 
 if __name__ == "__main__":
