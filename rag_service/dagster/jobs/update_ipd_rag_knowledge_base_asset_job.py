@@ -1,0 +1,8 @@
+from dagster import define_asset_job
+
+from rag_service.dagster.assets.updated_ipd_rag_knowledge_base_asset import update_ipd_rag_knowledge_base_asset
+
+UPDATE_IPD_RAG_KNOWLEDGE_BASE_ASSET_JOB_NAME = "update_ipd_rag_knowledge_base_asset_job"
+update_ipd_rag_knowledge_base_asset_job = define_asset_job(
+    UPDATE_IPD_RAG_KNOWLEDGE_BASE_ASSET_JOB_NAME, [update_ipd_rag_knowledge_base_asset]
+)

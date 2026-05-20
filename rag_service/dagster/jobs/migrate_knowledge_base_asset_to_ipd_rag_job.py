@@ -1,0 +1,8 @@
+from dagster import define_asset_job
+
+from rag_service.dagster.assets.migrate_knowledge_base_asset_to_ipd_rag import migrate_knowledge_base_asset_to_ipd_rag
+
+MIGRATE_KNOWLEDGE_BASE_ASSET_TO_IPD_RAG_JOB_NAME = "migrate_knowledge_base_asset_to_ipd_rag_job"
+migrate_knowledge_base_asset_to_ipd_rag_job = define_asset_job(
+    MIGRATE_KNOWLEDGE_BASE_ASSET_TO_IPD_RAG_JOB_NAME, [migrate_knowledge_base_asset_to_ipd_rag]
+)
