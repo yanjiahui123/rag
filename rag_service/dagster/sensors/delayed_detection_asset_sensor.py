@@ -10,7 +10,7 @@ from rag_service.dagster import delayed_detection_job
 from rag_service.dagster.assets.delayed_document_detection_asset import delayed_detection_asset
 from rag_service.dagster.dagster_common_op import (
     dummy_delay_consumer,
-    is_delayed_detection_enabled,
+    is_corpus_quality_detection_enabled,
     load_document_pairs,
 )
 from rag_service.dagster.partitions.knowledge_base_asset_partition import knowledge_base_asset_partitions_def
@@ -33,8 +33,8 @@ def delayed_detection_asset_sensor():
     shanghai_tz = pytz.timezone("Asia/Shanghai")
     current_shanghai_time = datetime.now(shanghai_tz)
     with Session(engine) as session:
-        if not is_delayed_detection_enabled(session):
-            return SkipReason("延迟语料检测开关未开启")
+        if not is_corpus_quality_detection_enabled(session):
+            return SkipReason("语料质量检测开关未开启")
 
         pending_jobs: List[AutoJobInstances] = get_pending_jobs_by_type(
             VectorizationJobType.DELAYED_DOCUMENT_DETECTION, session

@@ -116,16 +116,25 @@ from rag_service.vectorstore.elasticsearch.es_model import EsQueryResult
 
 logger = get_logger(module=Module.VECTORIZATION)
 
-DELAYED_DETECTION_ENABLED_CONFIG = "enable_delayed_document_detection"
+CORPUS_QUALITY_DETECTION_ENABLED_CONFIG = "enable_corpus_quality_detection"
 
 
-def is_delayed_detection_enabled(session: Session) -> bool:
+def is_corpus_quality_detection_enabled(session: Session) -> bool:
     config_value = session.exec(
-        select(ServiceConfig.value).where(ServiceConfig.name == DELAYED_DETECTION_ENABLED_CONFIG)
+        select(ServiceConfig.value).where(ServiceConfig.name == CORPUS_QUALITY_DETECTION_ENABLED_CONFIG)
     ).one_or_none()
     if config_value is None:
         return False
     return str(config_value).strip() == "1"
+
+
+def should_skip_corpus_quality_detection(context: OpExecutionContext) -> bool:
+    with Session(engine) as session:
+        enabled = is_corpus_quality_detection_enabled(session)
+    if enabled:
+        return False
+    logger.info("语料质量检测开关未开启，跳过检测任务")
+    return True
 
 
 @op(retry_policy=RetryPolicy(max_retries=3))
@@ -540,6 +549,8 @@ def load_original_documents(
 
 @op()
 def document_structure_detect(context: OpExecutionContext, documents: List[Tuple[OriginalDocument, List[Document]]]):
+    if should_skip_corpus_quality_detection(context):
+        return
     kb_sn, kba_name = parse_asset_partition_key(context.partition_key)
     kb_id, kba_id, _ = _get_kb_id_and_kba_id_by_context(kb_sn, kba_name)
     job_id = uuid.UUID(context.op_config["job_id"])
@@ -550,6 +561,8 @@ def document_structure_detect(context: OpExecutionContext, documents: List[Tuple
 
 @op()
 def punctuation_detect(context: OpExecutionContext, documents: List[Tuple[OriginalDocument, List[Document]]]):
+    if should_skip_corpus_quality_detection(context):
+        return
     kb_sn, kba_name = parse_asset_partition_key(context.partition_key)
     kb_id, kba_id, _ = _get_kb_id_and_kba_id_by_context(kb_sn, kba_name)
     job_id = uuid.UUID(context.op_config["job_id"])
@@ -562,6 +575,8 @@ def punctuation_detect(context: OpExecutionContext, documents: List[Tuple[Origin
 
 @op()
 def document_url_detect(context: OpExecutionContext, documents: List[Tuple[OriginalDocument, List[Document]]]):
+    if should_skip_corpus_quality_detection(context):
+        return
     kb_sn, kba_name = parse_asset_partition_key(context.partition_key)
     with Session(engine) as session:
         knowledge_base_asset = get_knowledge_base_asset(session, kb_sn, kba_name)
@@ -580,6 +595,8 @@ def document_url_detect(context: OpExecutionContext, documents: List[Tuple[Origi
 def document_similarity_detect(
     context: OpExecutionContext, ins: Tuple[List[Tuple[OriginalDocument, List[Document]]], str, str, str]
 ):
+    if should_skip_corpus_quality_detection(context):
+        return
     documents_info, vectorization_job_id, kb_sn, kba_name = ins
     vectorization_job_id = uuid.UUID(vectorization_job_id)
     kb_id, kba_id, _ = _get_kb_id_and_kba_id_by_context(kb_sn, kba_name)
@@ -594,6 +611,8 @@ def document_similarity_detect(
 def document_consistency_detect(
     context: OpExecutionContext, ins: Tuple[List[Tuple[OriginalDocument, List[Document]]], str, str, str]
 ):
+    if should_skip_corpus_quality_detection(context):
+        return
     documents_info, vectorization_job_id, kb_sn, kba_name = ins
     vectorization_job_id = uuid.UUID(vectorization_job_id)
     kb_id, kba_id, _ = _get_kb_id_and_kba_id_by_context(kb_sn, kba_name)
@@ -608,6 +627,8 @@ def document_consistency_detect(
 def document_semantic_coherence_detect(
     context: OpExecutionContext, ins: Tuple[List[Tuple[OriginalDocument, List[Document]]], str, str, str]
 ):
+    if should_skip_corpus_quality_detection(context):
+        return
     documents_info, vectorization_job_id, kb_sn, kba_name = ins
     vectorization_job_id = uuid.UUID(vectorization_job_id)
     kb_id, kba_id, _ = _get_kb_id_and_kba_id_by_context(kb_sn, kba_name)
@@ -622,6 +643,8 @@ def document_semantic_coherence_detect(
 def document_semantic_integrity_detect(
     context: OpExecutionContext, document_infos: List[Tuple[OriginalDocument, List[Document], List[List[float]]]]
 ):
+    if should_skip_corpus_quality_detection(context):
+        return
     kb_sn, kba_name = parse_asset_partition_key(context.partition_key)
     kb_id, kba_id, embedding_model = _get_kb_id_and_kba_id_by_context(kb_sn, kba_name)
     job_id = uuid.UUID(context.op_config["job_id"])
@@ -636,6 +659,8 @@ def document_semantic_integrity_detect(
 def document_logic_detect(
     context: OpExecutionContext, ins: Tuple[List[Tuple[OriginalDocument, List[Document]]], str, str, str]
 ):
+    if should_skip_corpus_quality_detection(context):
+        return
     documents_info, vectorization_job_id, kb_sn, kba_name = ins
     vectorization_job_id = uuid.UUID(vectorization_job_id)
     kb_id, kba_id, _ = _get_kb_id_and_kba_id_by_context(kb_sn, kba_name)
@@ -700,10 +725,8 @@ def save_delayed_detection_document_data(
 
     knowledge_base_serial_number, knowledge_base_asset_name = parse_asset_partition_key(context.partition_key)
 
-    with Session(engine) as session:
-        if not is_delayed_detection_enabled(session):
-            logger.info("延迟语料检测开关未开启，跳过任务创建")
-            return
+    if should_skip_corpus_quality_detection(context):
+        return
 
     # 保存路径
     save_dir = get_detection_info_root_dir(knowledge_base_serial_number, knowledge_base_asset_name)
@@ -1264,6 +1287,8 @@ def insert_update_record(
 def document_readability_detect(
     context: OpExecutionContext, ins: Tuple[List[Tuple[OriginalDocument, List[Document]]], str, str, str]
 ):
+    if should_skip_corpus_quality_detection(context):
+        return
     documents_info, vectorization_job_id, kb_sn, kba_name = ins
     vectorization_job_id = uuid.UUID(vectorization_job_id)
     kb_id, kba_id, _ = _get_kb_id_and_kba_id_by_context(kb_sn, kba_name)
