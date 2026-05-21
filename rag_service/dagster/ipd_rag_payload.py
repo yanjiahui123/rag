@@ -1,6 +1,7 @@
 import copy
 import json
 import os
+from collections.abc import Mapping
 from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional
 
 
@@ -39,7 +40,7 @@ def _configured_int(env_name: str, default: int, minimum: int) -> int:
 
 
 def dataops_entries_payload_size(document_entries: List[DocumentEntry]) -> int:
-    payload = json.dumps(document_entries, ensure_ascii=False, separators=(",", ":"))
+    payload = _dump_dataops_json(document_entries)
     return len(payload.encode("utf-8"))
 
 
@@ -95,10 +96,33 @@ def send_document_entries_to_dataops(
     max_payload_bytes: Optional[int] = None,
 ) -> None:
     for batch in batch_document_entries_for_dataops(document_entries, max_payload_bytes=max_payload_bytes):
+        safe_batch = json_safe_document_entries(batch)
         if doc_id is None:
-            sender(ipd_rag_kb_sn, kb_sn, batch)
+            sender(ipd_rag_kb_sn, kb_sn, safe_batch)
         else:
-            sender(ipd_rag_kb_sn, kb_sn, batch, doc_id)
+            sender(ipd_rag_kb_sn, kb_sn, safe_batch, doc_id)
+
+
+def json_safe_document_entries(document_entries: List[DocumentEntry]) -> List[DocumentEntry]:
+    return [_json_safe_value(document_entry) for document_entry in document_entries]
+
+
+def _dump_dataops_json(value: Any) -> str:
+    return json.dumps(_json_safe_value(value), ensure_ascii=False, separators=(",", ":"))
+
+
+def _json_safe_value(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return {str(key): _json_safe_value(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_json_safe_value(item) for item in value]
+    if isinstance(value, tuple):
+        return [_json_safe_value(item) for item in value]
+    try:
+        json.dumps(value)
+    except (TypeError, ValueError):
+        return str(value)
+    return value
 
 
 def _split_slices_by_entry_payload(
