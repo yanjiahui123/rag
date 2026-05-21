@@ -46,13 +46,6 @@ from rag_service.document_loaders.parsed_blocks import (
     documents_to_parsed_blocks,
 )
 from rag_service.document_loaders.structured_artifacts import (
-    extract_parsed_markdown_artifact_prefix,
-    extract_structured_docx_artifact_prefix,
-    extract_structured_excel_artifact_prefix,
-    extract_structured_html_artifact_prefix,
-    extract_structured_image_object_keys,
-    extract_structured_markdown_artifact_prefix,
-    is_safe_structured_artifact_prefix,
     merge_structured_metadata,
     merge_structured_docx_metadata,
     persist_parsed_markdown_artifact,
@@ -65,6 +58,9 @@ from rag_service.document_loaders.structured_artifacts import (
     STRUCTURED_EXCEL_METADATA_KEY,
     STRUCTURED_HTML_METADATA_KEY,
     STRUCTURED_MARKDOWN_METADATA_KEY,
+)
+from rag_service.dagster.resource_cleanup import (
+    delete_vector_store_resources as delete_external_vector_store_resources,
 )
 from rag_service.logger import Module, get_logger
 from rag_service.models.database.models import AutoJobInstances, ServiceConfig, UpdatedOriginalDocument, VectorStore
@@ -194,36 +190,13 @@ def delete_knowledge_base_asset_resources(context: OpExecutionContext):
 
 
 def delete_vector_store_resources(vector_store: VectorStore, delete_download_key: bool = True):
-    for original_document in vector_store.original_documents:
-        if delete_download_key and original_document.download_key:
-            delete_object(original_document.download_key)
-        for artifact_prefix in _artifact_prefixes_to_delete(original_document.extended_metadata):
-            _delete_structured_artifact_prefix(artifact_prefix)
-        _delete_structured_image_objects(original_document.extended_metadata)
-
-
-def _artifact_prefixes_to_delete(extended_metadata: Optional[Dict[str, Any]]) -> List[Optional[str]]:
-    return [
-        extract_structured_docx_artifact_prefix(extended_metadata),
-        extract_structured_excel_artifact_prefix(extended_metadata),
-        extract_structured_html_artifact_prefix(extended_metadata),
-        extract_structured_markdown_artifact_prefix(extended_metadata),
-        extract_parsed_markdown_artifact_prefix(extended_metadata),
-    ]
-
-
-def _delete_structured_artifact_prefix(artifact_prefix: Optional[str]) -> None:
-    if not artifact_prefix:
-        return
-    if is_safe_structured_artifact_prefix(artifact_prefix):
-        delete_dir(artifact_prefix)
-        return
-    logger.warning("Skip unsafe structured artifact prefix deletion: %s", artifact_prefix)
-
-
-def _delete_structured_image_objects(extended_metadata: Optional[Dict[str, Any]]) -> None:
-    for image_object_key in extract_structured_image_object_keys(extended_metadata):
-        delete_object(image_object_key)
+    delete_external_vector_store_resources(
+        vector_store,
+        delete_download_key=delete_download_key,
+        delete_object_func=delete_object,
+        delete_dir_func=delete_dir,
+        logger=logger,
+    )
 
 
 def document_deduplication(original_documents):
