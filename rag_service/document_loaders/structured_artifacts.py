@@ -77,8 +77,9 @@ def _build_document_artifact_prefix(kba_id: str, doc_id: str, artifact_type: str
 
 def _safe_download_file_name(file_name: str) -> str:
     name = str(file_name or "download").replace("\\", "/").rsplit("/", 1)[-1]
-    name = re.sub(_SAFE_DOWNLOAD_FILE_NAME_REGEX, "_", name).strip("._")
-    return name or "download"
+    extension = name.rsplit(".", 1)[-1] if "." in name else ""
+    extension = re.sub(_SAFE_DOWNLOAD_FILE_NAME_REGEX, "_", extension).strip("._")
+    return f"source.{extension}" if extension else "source"
 
 
 def is_safe_knowledge_base_asset_artifact_prefix(prefix: Optional[str]) -> bool:

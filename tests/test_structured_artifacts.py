@@ -188,7 +188,11 @@ class StructuredArtifactsTests(unittest.TestCase):
         self.assertEqual(build_document_download_prefix(KBA_ID, DOC_ID), f"{DOC_PREFIX}/download/")
         self.assertEqual(
             build_document_download_key(KBA_ID, DOC_ID, "Folder/My File.pdf"),
-            f"{DOC_PREFIX}/download/My_File.pdf",
+            f"{DOC_PREFIX}/download/source.pdf",
+        )
+        self.assertEqual(
+            build_document_download_key(KBA_ID, DOC_ID, "Folder/00 \u9700\u6c42\u6587\u6863-\u8bbe\u8ba1\u7a3f.docx"),
+            f"{DOC_PREFIX}/download/source.docx",
         )
         self.assertEqual(build_document_artifacts_prefix(KBA_ID, DOC_ID), f"{ARTIFACTS_PREFIX}/")
         self.assertEqual(
