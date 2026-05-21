@@ -67,7 +67,7 @@ from rag_service.document_loaders.structured_artifacts import (
     STRUCTURED_MARKDOWN_METADATA_KEY,
 )
 from rag_service.logger import Module, get_logger
-from rag_service.models.database.models import AutoJobInstances, UpdatedOriginalDocument, VectorStore
+from rag_service.models.database.models import AutoJobInstances, ServiceConfig, UpdatedOriginalDocument, VectorStore
 from rag_service.models.database.models import OriginalDocument as OriginalDocumentEntity
 from rag_service.models.enums import (
     AssetType,
@@ -115,6 +115,17 @@ from rag_service.vectorstore import get_vector_store_manager
 from rag_service.vectorstore.elasticsearch.es_model import EsQueryResult
 
 logger = get_logger(module=Module.VECTORIZATION)
+
+DELAYED_DETECTION_ENABLED_CONFIG = "enable_delayed_document_detection"
+
+
+def is_delayed_detection_enabled(session: Session) -> bool:
+    config_value = session.exec(
+        select(ServiceConfig.value).where(ServiceConfig.name == DELAYED_DETECTION_ENABLED_CONFIG)
+    ).one_or_none()
+    if config_value is None:
+        return False
+    return str(config_value).strip() == "1"
 
 
 @op(retry_policy=RetryPolicy(max_retries=3))
@@ -689,6 +700,11 @@ def save_delayed_detection_document_data(
 
     knowledge_base_serial_number, knowledge_base_asset_name = parse_asset_partition_key(context.partition_key)
 
+    with Session(engine) as session:
+        if not is_delayed_detection_enabled(session):
+            logger.info("延迟语料检测开关未开启，跳过任务创建")
+            return
+
     # 保存路径
     save_dir = get_detection_info_root_dir(knowledge_base_serial_number, knowledge_base_asset_name)
     save_dir.mkdir(parents=True, exist_ok=True)
@@ -731,8 +747,8 @@ def load_document_pairs(context: OpExecutionContext):
         job_info = job.extra_info
 
     pkl_file = Path(job_info["save_path"])
-    if not save_dir.exists() or not pkl_file:
-        context.log.warning(f"目录不存在: {save_dir}")
+    if not save_dir.exists() or not pkl_file.exists():
+        context.log.warning(f"检测数据文件不存在: {pkl_file}")
         return
 
     # 加载对应的 pickle 文件

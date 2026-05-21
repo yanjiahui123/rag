@@ -54,6 +54,7 @@ class ConsistencyDetector(
         if not doc_infos:
             return []
 
+        config = config or {}
         kb_sn = config.get("kb_sn")
         operation_details = []
         vs_manager = get_vector_store_manager()
@@ -79,8 +80,10 @@ class ConsistencyDetector(
     def _filter_first_different_doc(
         self, chunk: Document, related_chunks: List[RetrievedDocument]
     ) -> List[RetrievedDocument]:
+        ori_doc_source = chunk.metadata.get("source", "")
         for related_chunk in related_chunks:
-            if related_chunk.text != chunk.page_content:
+            doc_source = related_chunk.metadata.source if related_chunk.metadata.source else ""
+            if related_chunk.text != chunk.page_content and doc_source != ori_doc_source:
                 return [related_chunk]
         return []
 
@@ -114,30 +117,38 @@ class ConsistencyDetector(
                     f"任务id：{job_id}，当前片段doc_id：{doc.doc_id}，矛盾片段来源：{related_chunk.metadata.source}\n"
                     f"原始片段内容：{ori_chunk.page_content}\n矛盾片段内容：{related_chunk.text}"
                 )
-                segment_row_info = SegmentRawInfo(
-                    content=ori_chunk.page_content,
-                    kb_sn=ori_chunk.metadata.get("extended_metadata").get("kb_sn", ""),
-                    asset_name=ori_chunk.metadata.get("extended_metadata").get("asset_name", ""),
-                    source=ori_doc_source,
-                    doc_id=str(doc.doc_id),
-                )
-                segment_comparison_raw_info = SegmentComparisonRawInfo(
-                    content=related_chunk.text,
-                    kb_sn=related_chunk.metadata.extended_metadata.get("kb_sn", ""),
-                    asset_name=related_chunk.metadata.extended_metadata.get("asset_name", ""),
-                    source=doc_source,
-                    judge_reason=reason,
-                    es_doc_id=related_chunk.es_doc_id,
-                    doc_id=str(related_chunk.metadata.extended_metadata.get("doc_id", None)),
-                )
                 operation_details.append(
                     DetectionMetadata(
                         operation=f"片段存在逻辑性问题，判断原因如下：\n{reason}",
-                        segment_row_info=segment_row_info,
-                        segment_comparison_raw_info=segment_comparison_raw_info,
+                        segment_row_info=self._build_segment_row_info(ori_chunk, ori_doc_source, doc),
+                        segment_comparison_raw_info=self._build_segment_comparison_raw_info(
+                            related_chunk, doc_source, reason
+                        ),
                     )
                 )
         return operation_details
+
+    def _build_segment_row_info(self, ori_chunk: Document, ori_doc_source: str, doc: OriginalDocument):
+        extended_metadata = ori_chunk.metadata.get("extended_metadata") or {}
+        return SegmentRawInfo(
+            content=ori_chunk.page_content,
+            kb_sn=extended_metadata.get("kb_sn", ""),
+            asset_name=extended_metadata.get("asset_name", ""),
+            source=ori_doc_source,
+            doc_id=str(doc.doc_id),
+        )
+
+    def _build_segment_comparison_raw_info(self, related_chunk: RetrievedDocument, doc_source: str, reason: str):
+        extended_metadata = related_chunk.metadata.extended_metadata or {}
+        return SegmentComparisonRawInfo(
+            content=related_chunk.text,
+            kb_sn=extended_metadata.get("kb_sn", ""),
+            asset_name=extended_metadata.get("asset_name", ""),
+            source=doc_source,
+            judge_reason=reason,
+            es_doc_id=related_chunk.es_doc_id,
+            doc_id=str(extended_metadata.get("doc_id", None)),
+        )
 
     def detect_chunk_consistency(
         self, doc, chunks, vs_manager, analyzer, embed_model_and_vector_stores, llm_model, job_id

@@ -60,7 +60,7 @@ class CorpusDetector(ABC):
                 job_id=job_id,
                 rule_code=rule_code,
                 detection_context=detection_info.dict(),
-                comparison_doc_id=detection_info.segment_comparison_raw_info.doc_id
+                compare_doc_id=detection_info.segment_comparison_raw_info.doc_id
                 if detection_info.segment_comparison_raw_info
                 else None,
                 kb_id=kb_id if kb_id else None,

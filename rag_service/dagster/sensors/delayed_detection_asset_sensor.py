@@ -10,6 +10,7 @@ from rag_service.dagster import delayed_detection_job
 from rag_service.dagster.assets.delayed_document_detection_asset import delayed_detection_asset
 from rag_service.dagster.dagster_common_op import (
     dummy_delay_consumer,
+    is_delayed_detection_enabled,
     load_document_pairs,
 )
 from rag_service.dagster.partitions.knowledge_base_asset_partition import knowledge_base_asset_partitions_def
@@ -32,6 +33,9 @@ def delayed_detection_asset_sensor():
     shanghai_tz = pytz.timezone("Asia/Shanghai")
     current_shanghai_time = datetime.now(shanghai_tz)
     with Session(engine) as session:
+        if not is_delayed_detection_enabled(session):
+            return SkipReason("延迟语料检测开关未开启")
+
         pending_jobs: List[AutoJobInstances] = get_pending_jobs_by_type(
             VectorizationJobType.DELAYED_DOCUMENT_DETECTION, session
         )
@@ -103,4 +107,10 @@ def _get_delay_job_time_config(config_name: str, default_value: int) -> int:
         result = session.exec(
             select(ServiceConfig.value).where(ServiceConfig.name == config_name)
         ).one_or_none()
-        return int(result) if result is not None else default_value
+    try:
+        config_hour = int(result) if result is not None else default_value
+    except (TypeError, ValueError):
+        return default_value
+    if 0 <= config_hour <= 23:
+        return config_hour
+    return default_value
