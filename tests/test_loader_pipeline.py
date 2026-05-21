@@ -212,6 +212,41 @@ class LoaderPipelineTests(unittest.TestCase):
         self.assertEqual(parsed_document.blocks, [])
         self.assertFalse(structured_loader.load_called)
 
+    def test_parse_file_configures_structured_image_upload_prefix(self):
+        original_document = FakeOriginalDocument()
+        original_document.doc_id = "22222222-2222-2222-2222-222222222222"
+        parsed_document_factory = self.loader.ParsedDocument
+
+        class StructuredLoader:
+            def __init__(self):
+                self.loader = types.SimpleNamespace(
+                    artifact_type="structured_docx",
+                    image_upload_prefix="",
+                )
+
+            def parse_to_document(self):
+                return parsed_document_factory(metadata={"image_upload_prefix": self.loader.image_upload_prefix})
+
+        structured_loader = StructuredLoader()
+        original_get_loader = self.loader.get_loader
+        self.loader.get_loader = lambda *args, **kwargs: structured_loader
+        try:
+            parsed_document = self.loader.parse_file(
+                original_document,
+                types.SimpleNamespace(),
+                FakeAssetType.QA_PAIR,
+                knowledge_base_asset_id="11111111-1111-1111-1111-111111111111",
+            )
+        finally:
+            self.loader.get_loader = original_get_loader
+
+        self.assertEqual(
+            parsed_document.metadata["image_upload_prefix"],
+            "11111111-1111-1111-1111-111111111111/"
+            "22222222-2222-2222-2222-222222222222/"
+            "artifacts/structured_docx/images/",
+        )
+
     def test_docx_default_loader_uses_structured_loader_for_new_documents(self):
         default_loader = self.loader._TYPE_TO_DEFAULT_LOADER[".docx"]
 

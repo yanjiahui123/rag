@@ -44,6 +44,7 @@ from rag_service.document_loaders.parsed_blocks import (
 )
 from rag_service.document_loaders.ppt_helper_loader import PowerPointHelperLoader
 from rag_service.document_loaders.qa_loader import XlsxForQaLoader
+from rag_service.document_loaders.structured_artifacts import build_document_artifact_images_prefix
 from rag_service.document_loaders.structured_docx_loader import StructuredDocxLoader
 from rag_service.document_loaders.structured_excel_loader import StructuredExcelLoader
 from rag_service.document_loaders.structured_html_loader import StructuredHtmlLoader
@@ -309,8 +310,8 @@ class StructuredDocxByBlockLoader(
     description="DOCX结构化解析加载器，先输出ParsedDocument，再交由统一切片阶段处理",
     processable_types=[FileExtension.DOCX],
 ):
-    def __init__(self, file_path: str):
-        self.loader = StructuredDocxLoader(file_path)
+    def __init__(self, file_path: str, source: Optional[str] = None):
+        self.loader = StructuredDocxLoader(file_path, source=source)
         self.degrade_loader = Docx2txtLoader(file_path)
 
     def load(self) -> List[Document]:
@@ -326,8 +327,8 @@ class StructuredXlsxByBlockLoader(
     description="XLSX结构化解析加载器，按表格识别、切片并保留复杂表头展示产物",
     processable_types=[FileExtension.XLSX],
 ):
-    def __init__(self, file_path: str):
-        self.loader = StructuredExcelLoader(file_path)
+    def __init__(self, file_path: str, source: Optional[str] = None):
+        self.loader = StructuredExcelLoader(file_path, source=source)
         self.degrade_loader = XlsxToMarkdownLoader(file_path)
 
     def load(self) -> List[Document]:
@@ -343,8 +344,8 @@ class StructuredHtmlByBlockLoader(
     description="HTML结构化解析加载器，按正文和表格输出ParsedDocument并保留复杂表格展示产物",
     processable_types=[FileExtension.HTML],
 ):
-    def __init__(self, file_path: str):
-        self.loader = StructuredHtmlLoader(file_path)
+    def __init__(self, file_path: str, source: Optional[str] = None):
+        self.loader = StructuredHtmlLoader(file_path, source=source)
         self.degrade_loader = BSHTMLLoader(file_path)
 
     def load(self) -> List[Document]:
@@ -360,8 +361,8 @@ class StructuredMarkdownByBlockLoader(
     description="Markdown structured loader that preserves the original markdown and lets heading-aware splitting run later",
     processable_types=[FileExtension.MARKDOWN],
 ):
-    def __init__(self, file_path: str):
-        self.loader = StructuredMarkdownLoader(file_path)
+    def __init__(self, file_path: str, source: Optional[str] = None):
+        self.loader = StructuredMarkdownLoader(file_path, source=source)
         self.degrade_loader = UnstructuredMarkdownLoader(file_path)
 
     def load(self) -> List[Document]:
@@ -405,6 +406,12 @@ _TYPE_TO_DEFAULT_LOADER: Dict[str, Type[BaseLoader]] = {
 }
 
 _LOADERS_WITH_CHUNK_SIZE = [HTMLByHeadAndLengthLoader, MarkdownToHTMLByHeadAndLengthLoader, DocxByHeadAndLengthLoader]
+_STRUCTURED_LOADERS_WITH_SOURCE = [
+    StructuredDocxByBlockLoader,
+    StructuredXlsxByBlockLoader,
+    StructuredHtmlByBlockLoader,
+    StructuredMarkdownByBlockLoader,
+]
 
 
 def get_loaders() -> Dict[str, List[str]]:
@@ -453,6 +460,8 @@ def get_loader(
     if loader_class in _LOADERS_WITH_CHUNK_SIZE:
         chunk_size = get_splitter_chunk_size(loader_conf, vectorization_config)
         return loader_class(file_path, chunk_size=chunk_size)
+    if loader_class in _STRUCTURED_LOADERS_WITH_SOURCE:
+        return loader_class(file_path, source=source)
     if loader_class == HTMLByHeadLoader and asset_type in [
         AssetType.ASCEND_OFFICIAL_DOC,
         AssetType.KUNPENG_OFFICIAL_DOC,
@@ -509,13 +518,33 @@ def _handle_load_exception(original_document: OriginalDocument, error: Exception
                           DOC_IMPORT_FAIL_LOAD.format(str(error)), DocumentLoadStatus.FAILURE)
 
 
+def _apply_document_resource_context(
+    loader: BaseLoader,
+    knowledge_base_asset_id: Optional[str],
+    doc_id: str,
+) -> None:
+    if not knowledge_base_asset_id:
+        return
+    structured_loader = loader.loader if hasattr(loader, "loader") else loader
+    artifact_type = structured_loader.artifact_type if hasattr(structured_loader, "artifact_type") else ""
+    if not artifact_type or not hasattr(structured_loader, "image_upload_prefix"):
+        return
+    structured_loader.image_upload_prefix = build_document_artifact_images_prefix(
+        str(knowledge_base_asset_id),
+        str(doc_id),
+        str(artifact_type),
+    )
+
+
 def parse_file(
     original_document: OriginalDocument,
     vectorization_config: VectorizationConfig,
     asset_type: AssetType,
+    knowledge_base_asset_id: Optional[str] = None,
 ) -> ParsedDocument:
     try:
         loader = get_loader(original_document.uri, vectorization_config, original_document.source, asset_type)
+        _apply_document_resource_context(loader, knowledge_base_asset_id, str(original_document.doc_id))
         return loader.parse_to_document()
     except Exception as e:
         _handle_load_exception(original_document, e)

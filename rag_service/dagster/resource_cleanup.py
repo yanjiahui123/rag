@@ -38,7 +38,9 @@ class VectorStoreResourceDeletionPlan(BaseModel):
 
 
 def build_vector_store_resource_deletion_plan(
-    vector_store: VectorStoreResource, delete_download_key: bool = True
+    vector_store: VectorStoreResource,
+    delete_download_key: bool = True,
+    covered_artifact_prefixes: Sequence[str] = (),
 ) -> VectorStoreResourceDeletionPlan:
     download_keys: List[str] = []
     artifact_prefixes: List[str] = []
@@ -50,11 +52,16 @@ def build_vector_store_resource_deletion_plan(
     seen_image_object_keys = set()
 
     for original_document in vector_store.original_documents:
-        if delete_download_key:
+        download_key = original_document.download_key
+        if (
+            delete_download_key
+            and download_key
+            and not _is_covered_by_prefix(str(download_key), covered_artifact_prefixes)
+        ):
             _append_unique(
                 download_keys,
                 seen_download_keys,
-                original_document.download_key,
+                download_key,
             )
 
         extended_metadata = original_document.extended_metadata
@@ -62,6 +69,8 @@ def build_vector_store_resource_deletion_plan(
             if not artifact_prefix:
                 continue
             if is_safe_structured_artifact_prefix(artifact_prefix):
+                if _is_covered_by_prefix(artifact_prefix, covered_artifact_prefixes):
+                    continue
                 _append_unique(artifact_prefixes, seen_artifact_prefixes, artifact_prefix)
             else:
                 _append_unique(unsafe_artifact_prefixes, seen_unsafe_artifact_prefixes, artifact_prefix)
@@ -72,7 +81,7 @@ def build_vector_store_resource_deletion_plan(
     filtered_image_object_keys = tuple(
         image_object_key
         for image_object_key in image_object_keys
-        if not _is_covered_by_prefix(image_object_key, artifact_prefixes)
+        if not _is_covered_by_prefix(image_object_key, tuple(covered_artifact_prefixes) + tuple(artifact_prefixes))
     )
 
     return VectorStoreResourceDeletionPlan(
@@ -91,8 +100,13 @@ def delete_vector_store_resources(
     delete_dir_func: DeleteDir,
     logger: Any,
     max_workers: int = DEFAULT_RESOURCE_DELETE_MAX_WORKERS,
+    covered_artifact_prefixes: Sequence[str] = (),
 ) -> VectorStoreResourceDeletionPlan:
-    plan = build_vector_store_resource_deletion_plan(vector_store, delete_download_key)
+    plan = build_vector_store_resource_deletion_plan(
+        vector_store,
+        delete_download_key,
+        covered_artifact_prefixes=covered_artifact_prefixes,
+    )
 
     for artifact_prefix in plan.unsafe_artifact_prefixes:
         logger.warning("Skip unsafe structured artifact prefix deletion: %s", artifact_prefix)

@@ -507,51 +507,94 @@ def _structured_artifact_key_parts(object_key: str) -> Optional[List[str]]:
     if not object_key or "\\" in object_key:
         return None
     parts = object_key.split("/")
-    if len(parts) < 3 or parts[1] not in ARTIFACT_METADATA_KEYS:
-        return None
     if any(part in ("", ".", "..") for part in parts):
+        return None
+    if _artifact_type_index(parts) is None:
         return None
     return parts
 
 
 def _document_obs_payload(object_key: str, parts: List[str]) -> Optional[Dict[str, Any]]:
-    if len(parts) != 3 or parts[2] not in DOCUMENT_ARTIFACT_FILES:
+    artifact_index = _artifact_type_index(parts)
+    if artifact_index is None:
+        return None
+    file_index = artifact_index + 1
+    if len(parts) != file_index + 1 or parts[file_index] not in DOCUMENT_ARTIFACT_FILES:
         return None
     prefix = _document_artifact_prefix(object_key)
-    return {
+    payload = _artifact_payload_base(parts, artifact_index)
+    payload.update({
         "kind": "document",
-        "doc_id": parts[0],
         "manifest_key": prefix + "manifest.json",
         "document_markdown_key": prefix + "document.md",
-    }
+    })
+    return payload
 
 
 def _section_obs_payload(object_key: str, parts: List[str]) -> Optional[Dict[str, Any]]:
-    if len(parts) != 4 or parts[2] != "sections" or not parts[3].endswith(".md"):
+    artifact_index = _artifact_type_index(parts)
+    if artifact_index is None:
         return None
-    return {
+    section_dir_index = artifact_index + 1
+    section_file_index = artifact_index + 2
+    if (
+        len(parts) != section_file_index + 1
+        or parts[section_dir_index] != "sections"
+        or not parts[section_file_index].endswith(".md")
+    ):
+        return None
+    payload = _artifact_payload_base(parts, artifact_index)
+    payload.update({
         "kind": "section",
-        "doc_id": parts[0],
-        "section_id": parts[3][:-3],
+        "section_id": parts[section_file_index][:-3],
         "section_ref": object_key,
-    }
+    })
+    return payload
 
 
 def _table_obs_payload(object_key: str, parts: List[str]) -> Optional[Dict[str, Any]]:
-    if len(parts) != 4 or parts[2] != "tables":
+    artifact_index = _artifact_type_index(parts)
+    if artifact_index is None:
+        return None
+    table_dir_index = artifact_index + 1
+    table_file_index = artifact_index + 2
+    if len(parts) != table_file_index + 1 or parts[table_dir_index] != "tables":
         return None
     stem = _table_ref_stem(object_key)
     if stem is None:
         return None
     table_id = stem.rsplit("/", 1)[-1]
-    return {
+    payload = _artifact_payload_base(parts, artifact_index)
+    payload.update({
         "kind": "table",
-        "doc_id": parts[0],
         "table_id": table_id,
         "display_ref": stem + ".html",
         "table_json_ref": stem + ".json",
         "llm_table_ref": stem + ".llm.md",
-    }
+    })
+    return payload
+
+
+def _artifact_type_index(parts: List[str]) -> Optional[int]:
+    if len(parts) >= 3 and parts[1] in ARTIFACT_METADATA_KEYS:
+        return 1
+    if len(parts) >= 4 and parts[2] in ARTIFACT_METADATA_KEYS:
+        return 2
+    if len(parts) >= 5 and parts[2] == "artifacts" and parts[3] in ARTIFACT_METADATA_KEYS:
+        return 3
+    return None
+
+
+def _artifact_payload_base(parts: List[str], artifact_index: int) -> Dict[str, Any]:
+    if artifact_index == 3:
+        return {
+            "knowledge_base_asset_id": parts[0],
+            "doc_id": parts[1],
+        }
+    payload = {"doc_id": parts[artifact_index - 1]}
+    if artifact_index == 2:
+        payload["knowledge_base_asset_id"] = parts[0]
+    return payload
 
 
 def _document_artifact_prefix(object_key: str) -> str:

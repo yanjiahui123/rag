@@ -37,10 +37,19 @@ class DocxMarkdownElement(BaseModel):
 
 
 class StructuredDocxLoader(StructuredDocumentLoader):
-    def __init__(self, file_path: str, source: Optional[str] = None, table_parser: Optional[DocxTableParser] = None):
+    artifact_type = "structured_docx"
+
+    def __init__(
+        self,
+        file_path: str,
+        source: Optional[str] = None,
+        table_parser: Optional[DocxTableParser] = None,
+        image_upload_prefix: str = "",
+    ):
         super().__init__(file_path, source)
         self.table_parser = table_parser or DocxTableParser()
         self.image_object_keys: List[str] = []
+        self.image_upload_prefix = image_upload_prefix
 
     def parse_blocks(self) -> List[ParsedBlock]:
         return self.parse_to_document().to_blocks()
@@ -112,7 +121,7 @@ class StructuredDocxLoader(StructuredDocumentLoader):
             image_part = related_parts.get(relation_id)
             if not _is_image_part(image_part):
                 continue
-            image = _upload_image_part(image_part)
+            image = _upload_image_part(image_part, self.image_upload_prefix)
             if image.markdown:
                 image_links.append(image.markdown)
             if image.object_key:
@@ -336,9 +345,9 @@ def _is_image_part(image_part: Any) -> bool:
     return partname.endswith((".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".tif", ".tiff", ".svg"))
 
 
-def _upload_image_part(image_part: Any) -> ImageMarkdown:
+def _upload_image_part(image_part: Any, object_key_prefix: str = "") -> ImageMarkdown:
     extension = image_extension_from_partname(getattr(image_part, "partname", ""))
-    return upload_image_bytes(getattr(image_part, "blob", b""), extension)
+    return upload_image_bytes(getattr(image_part, "blob", b""), extension, object_key_prefix=object_key_prefix)
 
 
 def _combine_text_and_images(text: str, image_markdown: List[str]) -> str:

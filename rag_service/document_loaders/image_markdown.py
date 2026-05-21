@@ -15,14 +15,14 @@ class ImageMarkdown(BaseModel):
     url: str = ""
 
 
-def upload_image_bytes(content: bytes, extension: str) -> ImageMarkdown:
+def upload_image_bytes(content: bytes, extension: str, object_key_prefix: str = "") -> ImageMarkdown:
     if not content:
         return ImageMarkdown()
     extension = _clean_extension(extension)
     try:
         from rag_service.utils.his_util.obs_util import upload_file_as_bytes
 
-        object_key = upload_file_as_bytes(str(uuid.uuid4()), content)
+        object_key = upload_file_as_bytes(f"{object_key_prefix}{uuid.uuid4()}.{extension}", content)
         url = _format_image_download_url(object_key, extension)
         return ImageMarkdown(markdown=f"![]({url})", object_key=object_key, url=url)
     except Exception as exc:
@@ -30,12 +30,12 @@ def upload_image_bytes(content: bytes, extension: str) -> ImageMarkdown:
         return ImageMarkdown()
 
 
-def upload_image_bytes_as_markdown(content: bytes, extension: str) -> str:
-    return upload_image_bytes(content, extension).markdown
+def upload_image_bytes_as_markdown(content: bytes, extension: str, object_key_prefix: str = "") -> str:
+    return upload_image_bytes(content, extension, object_key_prefix=object_key_prefix).markdown
 
 
-def upload_image_bytes_as_url(content: bytes, extension: str) -> str:
-    return upload_image_bytes(content, extension).url
+def upload_image_bytes_as_url(content: bytes, extension: str, object_key_prefix: str = "") -> str:
+    return upload_image_bytes(content, extension, object_key_prefix=object_key_prefix).url
 
 
 def image_extension_from_partname(partname: Any, default: str = "png") -> str:

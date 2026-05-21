@@ -24,10 +24,13 @@ DATA_IMAGE_PATTERN = re.compile(r"^data:image/([a-zA-Z0-9.+-]+);base64,(.*)$", r
 
 
 class StructuredHtmlLoader(StructuredDocumentLoader):
-    def __init__(self, file_path: str, source: Optional[str] = None):
+    artifact_type = "structured_html"
+
+    def __init__(self, file_path: str, source: Optional[str] = None, image_upload_prefix: str = ""):
         super().__init__(file_path, source)
         self.table_parser = HtmlTableParser()
         self.image_object_keys: List[str] = []
+        self.image_upload_prefix = image_upload_prefix
 
     def parse_blocks(self) -> List[ParsedBlock]:
         return self.parse_to_document().to_blocks()
@@ -40,8 +43,14 @@ class StructuredHtmlLoader(StructuredDocumentLoader):
         self.image_object_keys = []
         state = _ParseState(source=self.source)
         state.image_object_keys = self.image_object_keys
+        state.image_upload_prefix = self.image_upload_prefix
         base_dir = Path(self.file_path).parent if self.file_path else None
-        for event_type, payload in _content_events(_content_root(parse_html(html)), base_dir, state.image_object_keys):
+        for event_type, payload in _content_events(
+            _content_root(parse_html(html)),
+            base_dir,
+            state.image_object_keys,
+            state.image_upload_prefix,
+        ):
             self._handle_event(state, event_type, payload)
         self._append_text_block(state)
         return ParsedDocument(blocks=state.blocks, metadata=self._metadata(state.blocks, state.tables, state.image_object_keys))
@@ -126,6 +135,7 @@ class _ParseState:
         self.blocks: List[ParsedBlock] = []
         self.tables: List[TableBlock] = []
         self.image_object_keys: List[str] = []
+        self.image_upload_prefix = ""
 
 
 def _content_root(root: HtmlNode) -> HtmlNode:
@@ -136,6 +146,7 @@ def _content_events(
     node: HtmlNode,
     base_dir: Optional[Path] = None,
     image_object_keys: Optional[List[str]] = None,
+    image_upload_prefix: str = "",
 ) -> Iterable[Tuple[str, Any]]:
     image_object_keys = image_object_keys if image_object_keys is not None else []
     for child in node.children:
@@ -148,17 +159,17 @@ def _content_events(
         elif child.tag == "table":
             yield "table", child
         elif child.tag == "img":
-            text = _image_markdown(child, base_dir, image_object_keys)
+            text = _image_markdown(child, base_dir, image_object_keys, image_upload_prefix)
             if text:
                 yield "text", text
         elif child.tag in {"h1", "h2", "h3", "h4", "h5", "h6"}:
             yield "heading", (int(child.tag[1]), child.text())
         elif child.tag in {"p", "li"}:
-            text = _node_markdown_text(child, base_dir, image_object_keys)
+            text = _node_markdown_text(child, base_dir, image_object_keys, image_upload_prefix)
             if text:
                 yield "text", text
         else:
-            yield from _content_events(child, base_dir, image_object_keys)
+            yield from _content_events(child, base_dir, image_object_keys, image_upload_prefix)
 
 
 def _replace_header(headers: List[str], level: int, text: str) -> List[str]:
@@ -185,7 +196,12 @@ def _clean_text(text: str) -> str:
     return " ".join(text.split())
 
 
-def _node_markdown_text(node: HtmlNode, base_dir: Optional[Path], image_object_keys: List[str]) -> str:
+def _node_markdown_text(
+    node: HtmlNode,
+    base_dir: Optional[Path],
+    image_object_keys: List[str],
+    image_upload_prefix: str = "",
+) -> str:
     parts = []
     for child in node.children:
         if isinstance(child, str):
@@ -196,25 +212,30 @@ def _node_markdown_text(node: HtmlNode, base_dir: Optional[Path], image_object_k
         if child.tag in {"script", "style", "caption"}:
             continue
         if child.tag == "img":
-            image_text = _image_markdown(child, base_dir, image_object_keys)
+            image_text = _image_markdown(child, base_dir, image_object_keys, image_upload_prefix)
             if image_text:
                 parts.append(image_text)
             continue
-        text = _node_markdown_text(child, base_dir, image_object_keys)
+        text = _node_markdown_text(child, base_dir, image_object_keys, image_upload_prefix)
         if text:
             parts.append(text)
     return _join_markdown_parts(parts)
 
 
-def _image_markdown(node: HtmlNode, base_dir: Optional[Path], image_object_keys: List[str]) -> str:
+def _image_markdown(
+    node: HtmlNode,
+    base_dir: Optional[Path],
+    image_object_keys: List[str],
+    image_upload_prefix: str = "",
+) -> str:
     src = (node.attrs.get("src") or "").strip()
     if not src:
         return ""
     if _is_remote_image_src(src):
         return f"![]({src})"
     if _is_data_image_src(src):
-        return _data_image_markdown(src, image_object_keys)
-    return _local_image_markdown(src, base_dir, image_object_keys)
+        return _data_image_markdown(src, image_object_keys, image_upload_prefix)
+    return _local_image_markdown(src, base_dir, image_object_keys, image_upload_prefix)
 
 
 def _is_remote_image_src(src: str) -> bool:
@@ -225,7 +246,7 @@ def _is_data_image_src(src: str) -> bool:
     return bool(DATA_IMAGE_PATTERN.match(src))
 
 
-def _data_image_markdown(src: str, image_object_keys: List[str]) -> str:
+def _data_image_markdown(src: str, image_object_keys: List[str], image_upload_prefix: str = "") -> str:
     match = DATA_IMAGE_PATTERN.match(src)
     if not match:
         return ""
@@ -234,16 +255,28 @@ def _data_image_markdown(src: str, image_object_keys: List[str]) -> str:
         content = base64.b64decode(match.group(2), validate=True)
     except Exception:
         return ""
-    return _uploaded_image_markdown(_upload_html_image_bytes(content, extension), image_object_keys)
+    return _uploaded_image_markdown(
+        _upload_html_image_bytes(content, extension, image_upload_prefix),
+        image_object_keys,
+    )
 
 
-def _local_image_markdown(src: str, base_dir: Optional[Path], image_object_keys: List[str]) -> str:
+def _local_image_markdown(
+    src: str,
+    base_dir: Optional[Path],
+    image_object_keys: List[str],
+    image_upload_prefix: str = "",
+) -> str:
     if base_dir is None:
         return ""
     image_path = _safe_local_image_path(src, base_dir)
     if image_path is None or not image_path.is_file():
         return ""
-    uploaded = _upload_html_image_bytes(image_path.read_bytes(), image_path.suffix.lstrip(".") or "png")
+    uploaded = _upload_html_image_bytes(
+        image_path.read_bytes(),
+        image_path.suffix.lstrip(".") or "png",
+        image_upload_prefix,
+    )
     return _uploaded_image_markdown(uploaded, image_object_keys)
 
 
@@ -263,8 +296,8 @@ def _safe_local_image_path(src: str, base_dir: Path) -> Optional[Path]:
     return image_path
 
 
-def _upload_html_image_bytes(content: bytes, extension: str) -> ImageMarkdown:
-    return upload_image_bytes(content, extension)
+def _upload_html_image_bytes(content: bytes, extension: str, object_key_prefix: str = "") -> ImageMarkdown:
+    return upload_image_bytes(content, extension, object_key_prefix=object_key_prefix)
 
 
 def _uploaded_image_markdown(image: ImageMarkdown, image_object_keys: List[str]) -> str:

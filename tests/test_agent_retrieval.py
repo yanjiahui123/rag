@@ -85,6 +85,27 @@ def b64encode(value):
 
 
 class AgentRetrievalTests(unittest.TestCase):
+    def test_obs_key_payload_accepts_asset_scoped_artifact_paths(self):
+        from rag_service.agent_retrieval import service as svc
+
+        kba_id = "11111111-1111-1111-1111-111111111111"
+        doc_id = "22222222-2222-2222-2222-222222222222"
+        prefix = f"{kba_id}/{doc_id}/artifacts/structured_docx/"
+
+        document_payload = svc._obs_payload(prefix + "manifest.json", "document")
+        section_payload = svc._obs_payload(prefix + "sections/s1.md", "section")
+        table_payload = svc._obs_payload(prefix + "tables/t1.html", "table")
+
+        self.assertEqual(document_payload["doc_id"], doc_id)
+        self.assertEqual(document_payload["knowledge_base_asset_id"], kba_id)
+        self.assertEqual(document_payload["manifest_key"], prefix + "manifest.json")
+        self.assertEqual(section_payload["doc_id"], doc_id)
+        self.assertEqual(section_payload["knowledge_base_asset_id"], kba_id)
+        self.assertEqual(section_payload["section_id"], "s1")
+        self.assertEqual(table_payload["doc_id"], doc_id)
+        self.assertEqual(table_payload["knowledge_base_asset_id"], kba_id)
+        self.assertEqual(table_payload["table_id"], "t1")
+
     def test_search_slices_projects_documents_with_action_handles(self):
         from rag_service.agent_retrieval.models import SearchSlicesRequest
         from rag_service.agent_retrieval.service import AgentRetrievalService

@@ -127,7 +127,10 @@ class StructuredDocxLoaderTests(unittest.TestCase):
         with patch.object(
             structured_docx_loader,
             "_upload_image_part",
-            lambda part: ImageMarkdown(markdown="![](https://example.test/image1.png)", object_key="image-key-1"),
+            lambda part, object_key_prefix="": ImageMarkdown(
+                markdown="![](https://example.test/image1.png)",
+                object_key="image-key-1",
+            ),
             create=True,
         ):
             parsed_document = StructuredDocxLoader("demo.docx").parse_document(document)
@@ -137,6 +140,35 @@ class StructuredDocxLoaderTests(unittest.TestCase):
         artifacts = parsed_document.metadata[STRUCTURED_DOCX_ARTIFACTS_KEY]
         self.assertIn("![](https://example.test/image1.png)", artifacts["document_markdown"])
         self.assertEqual(artifacts["image_object_keys"], ["image-key-1"])
+
+    def test_parse_document_uploads_images_under_configured_prefix(self):
+        from unittest.mock import patch
+
+        from rag_service.document_loaders.image_markdown import ImageMarkdown
+        import rag_service.document_loaders.structured_docx_loader as structured_docx_loader
+        from rag_service.document_loaders.structured_artifacts import STRUCTURED_DOCX_ARTIFACTS_KEY
+        from rag_service.document_loaders.structured_docx_loader import StructuredDocxLoader
+
+        calls = []
+        image_xml = '<w:p><pic:pic><a:blip r:embed="rId9"/></pic:pic></w:p>'
+        document = FakeDocument(
+            [FakeParagraph("Report", "Heading 1"), FakeParagraph("", xml=image_xml)],
+            related_parts={"rId9": FakeImagePart()},
+        )
+
+        def fake_upload(content, extension, object_key_prefix=""):
+            calls.append((content, extension, object_key_prefix))
+            return ImageMarkdown(markdown="![](image)", object_key=object_key_prefix + "image.png")
+
+        with patch.object(structured_docx_loader, "upload_image_bytes", fake_upload):
+            parsed_document = StructuredDocxLoader(
+                "demo.docx",
+                image_upload_prefix="asset/doc/artifacts/structured_docx/images/",
+            ).parse_document(document)
+
+        self.assertEqual(calls, [(b"image-bytes", "png", "asset/doc/artifacts/structured_docx/images/")])
+        artifacts = parsed_document.metadata[STRUCTURED_DOCX_ARTIFACTS_KEY]
+        self.assertEqual(artifacts["image_object_keys"], ["asset/doc/artifacts/structured_docx/images/image.png"])
 
 
 if __name__ == "__main__":

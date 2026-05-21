@@ -102,7 +102,10 @@ class StructuredHtmlLoaderTests(unittest.TestCase):
         with patch.object(
             structured_html_loader,
             "_upload_html_image_bytes",
-            lambda content, extension: ImageMarkdown(markdown="![](https://example.test/image.png)", object_key="image-key-1"),
+            lambda content, extension, object_key_prefix="": ImageMarkdown(
+                markdown="![](https://example.test/image.png)",
+                object_key="image-key-1",
+            ),
             create=True,
         ):
             parsed_document = StructuredHtmlLoader("demo.html").parse_html(html)
@@ -110,6 +113,36 @@ class StructuredHtmlLoaderTests(unittest.TestCase):
         self.assertEqual(parsed_document.blocks[0].text, "# Report\n\n![](https://example.test/image.png)")
         artifacts = parsed_document.metadata[STRUCTURED_HTML_ARTIFACTS_KEY]
         self.assertEqual(artifacts["image_object_keys"], ["image-key-1"])
+
+    def test_parse_html_uploads_images_under_configured_prefix(self):
+        from unittest.mock import patch
+
+        from rag_service.document_loaders.image_markdown import ImageMarkdown
+        import rag_service.document_loaders.structured_html_loader as structured_html_loader
+        from rag_service.document_loaders.structured_artifacts import STRUCTURED_HTML_ARTIFACTS_KEY
+        from rag_service.document_loaders.structured_html_loader import StructuredHtmlLoader
+
+        calls = []
+        html = """
+        <html><body>
+          <h1>Report</h1>
+          <p><img src="data:image/png;base64,aW1hZ2UtYnl0ZXM="></p>
+        </body></html>
+        """
+
+        def fake_upload(content, extension, object_key_prefix=""):
+            calls.append((content, extension, object_key_prefix))
+            return ImageMarkdown(markdown="![](image)", object_key=object_key_prefix + "image.png")
+
+        with patch.object(structured_html_loader, "upload_image_bytes", fake_upload):
+            parsed_document = StructuredHtmlLoader(
+                "demo.html",
+                image_upload_prefix="asset/doc/artifacts/structured_html/images/",
+            ).parse_html(html)
+
+        self.assertEqual(calls, [(b"image-bytes", "png", "asset/doc/artifacts/structured_html/images/")])
+        artifacts = parsed_document.metadata[STRUCTURED_HTML_ARTIFACTS_KEY]
+        self.assertEqual(artifacts["image_object_keys"], ["asset/doc/artifacts/structured_html/images/image.png"])
 
 
 if __name__ == "__main__":

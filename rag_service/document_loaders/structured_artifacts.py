@@ -22,36 +22,79 @@ _SAFE_ARTIFACT_TYPES = (
     "structured_markdown",
     "parsed_markdown",
 )
+_UUID_PATTERN = r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
+_ARTIFACT_TYPE_PATTERN = "|".join(_SAFE_ARTIFACT_TYPES)
+_SAFE_DOWNLOAD_FILE_NAME_REGEX = r"[^A-Za-z0-9_.-]+"
 
 
-def build_structured_docx_artifact_prefix(kb_sn: str, asset_name: str, doc_id: str) -> str:
-    return _build_document_artifact_prefix(doc_id, "structured_docx")
+def build_knowledge_base_asset_artifact_prefix(kba_id: str) -> str:
+    return f"{kba_id}/"
 
 
-def build_structured_excel_artifact_prefix(kb_sn: str, asset_name: str, doc_id: str) -> str:
-    return _build_document_artifact_prefix(doc_id, "structured_excel")
+def build_document_resource_prefix(knowledge_base_asset_id: str, doc_id: str) -> str:
+    return f"{knowledge_base_asset_id}/{doc_id}/"
 
 
-def build_structured_html_artifact_prefix(kb_sn: str, asset_name: str, doc_id: str) -> str:
-    return _build_document_artifact_prefix(doc_id, "structured_html")
+def build_document_download_prefix(knowledge_base_asset_id: str, doc_id: str) -> str:
+    return build_document_resource_prefix(knowledge_base_asset_id, doc_id) + "download/"
 
 
-def build_structured_markdown_artifact_prefix(kb_sn: str, asset_name: str, doc_id: str) -> str:
-    return _build_document_artifact_prefix(doc_id, "structured_markdown")
+def build_document_download_key(knowledge_base_asset_id: str, doc_id: str, file_name: str) -> str:
+    return build_document_download_prefix(knowledge_base_asset_id, doc_id) + _safe_download_file_name(file_name)
 
 
-def build_parsed_markdown_artifact_prefix(kb_sn: str, asset_name: str, doc_id: str) -> str:
-    return _build_document_artifact_prefix(doc_id, "parsed_markdown")
+def build_document_artifacts_prefix(knowledge_base_asset_id: str, doc_id: str) -> str:
+    return build_document_resource_prefix(knowledge_base_asset_id, doc_id) + "artifacts/"
 
 
-def _build_document_artifact_prefix(doc_id: str, artifact_type: str) -> str:
-    return f"{doc_id}/{artifact_type}/"
+def build_document_artifact_images_prefix(knowledge_base_asset_id: str, doc_id: str, artifact_type: str) -> str:
+    return _build_document_artifact_prefix(knowledge_base_asset_id, doc_id, artifact_type) + "images/"
+
+
+def build_structured_docx_artifact_prefix(knowledge_base_asset_id: str, asset_name: str, doc_id: str) -> str:
+    return _build_document_artifact_prefix(knowledge_base_asset_id, doc_id, "structured_docx")
+
+
+def build_structured_excel_artifact_prefix(knowledge_base_asset_id: str, asset_name: str, doc_id: str) -> str:
+    return _build_document_artifact_prefix(knowledge_base_asset_id, doc_id, "structured_excel")
+
+
+def build_structured_html_artifact_prefix(knowledge_base_asset_id: str, asset_name: str, doc_id: str) -> str:
+    return _build_document_artifact_prefix(knowledge_base_asset_id, doc_id, "structured_html")
+
+
+def build_structured_markdown_artifact_prefix(knowledge_base_asset_id: str, asset_name: str, doc_id: str) -> str:
+    return _build_document_artifact_prefix(knowledge_base_asset_id, doc_id, "structured_markdown")
+
+
+def build_parsed_markdown_artifact_prefix(knowledge_base_asset_id: str, asset_name: str, doc_id: str) -> str:
+    return _build_document_artifact_prefix(knowledge_base_asset_id, doc_id, "parsed_markdown")
+
+
+def _build_document_artifact_prefix(kba_id: str, doc_id: str, artifact_type: str) -> str:
+    return build_document_artifacts_prefix(kba_id, doc_id) + f"{artifact_type}/"
+
+
+def _safe_download_file_name(file_name: str) -> str:
+    name = str(file_name or "download").replace("\\", "/").rsplit("/", 1)[-1]
+    name = re.sub(_SAFE_DOWNLOAD_FILE_NAME_REGEX, "_", name).strip("._")
+    return name or "download"
+
+
+def is_safe_knowledge_base_asset_artifact_prefix(prefix: Optional[str]) -> bool:
+    if not prefix:
+        return False
+    return bool(re.match(rf"^{_UUID_PATTERN}/$", prefix))
 
 
 def is_safe_structured_artifact_prefix(prefix: Optional[str]) -> bool:
     if not prefix:
         return False
-    return bool(re.match(rf"^[^/]+/({'|'.join(_SAFE_ARTIFACT_TYPES)})/$", prefix))
+    return bool(
+        re.match(rf"^{_UUID_PATTERN}/{_UUID_PATTERN}/artifacts/({_ARTIFACT_TYPE_PATTERN})/$", prefix)
+        or re.match(rf"^{_UUID_PATTERN}/{_UUID_PATTERN}/({_ARTIFACT_TYPE_PATTERN})/$", prefix)
+        or re.match(rf"^[^/]+/({_ARTIFACT_TYPE_PATTERN})/$", prefix)
+    )
 
 
 def extract_structured_docx_artifact_prefix(extended_metadata: Optional[Dict[str, Any]]) -> Optional[str]:
@@ -141,14 +184,14 @@ def merge_structured_metadata(
 
 def persist_structured_docx_artifacts(
     parsed_document: Any,
-    kb_sn: str,
+    knowledge_base_asset_id: str,
     asset_name: str,
     doc_id: str,
     upload_content: Callable[[str, str], str],
 ) -> Dict[str, Any]:
     return _persist_structured_artifacts(
         parsed_document,
-        build_structured_docx_artifact_prefix(kb_sn, asset_name, doc_id),
+        build_structured_docx_artifact_prefix(knowledge_base_asset_id, asset_name, doc_id),
         STRUCTURED_DOCX_ARTIFACTS_KEY,
         STRUCTURED_DOCX_METADATA_KEY,
         upload_content,
@@ -157,14 +200,14 @@ def persist_structured_docx_artifacts(
 
 def persist_structured_excel_artifacts(
     parsed_document: Any,
-    kb_sn: str,
+    knowledge_base_asset_id: str,
     asset_name: str,
     doc_id: str,
     upload_content: Callable[[str, str], str],
 ) -> Dict[str, Any]:
     return _persist_structured_artifacts(
         parsed_document,
-        build_structured_excel_artifact_prefix(kb_sn, asset_name, doc_id),
+        build_structured_excel_artifact_prefix(knowledge_base_asset_id, asset_name, doc_id),
         STRUCTURED_EXCEL_ARTIFACTS_KEY,
         STRUCTURED_EXCEL_METADATA_KEY,
         upload_content,
@@ -173,14 +216,14 @@ def persist_structured_excel_artifacts(
 
 def persist_structured_html_artifacts(
     parsed_document: Any,
-    kb_sn: str,
+    knowledge_base_asset_id: str,
     asset_name: str,
     doc_id: str,
     upload_content: Callable[[str, str], str],
 ) -> Dict[str, Any]:
     return _persist_structured_artifacts(
         parsed_document,
-        build_structured_html_artifact_prefix(kb_sn, asset_name, doc_id),
+        build_structured_html_artifact_prefix(knowledge_base_asset_id, asset_name, doc_id),
         STRUCTURED_HTML_ARTIFACTS_KEY,
         STRUCTURED_HTML_METADATA_KEY,
         upload_content,
@@ -189,14 +232,14 @@ def persist_structured_html_artifacts(
 
 def persist_structured_markdown_artifacts(
     parsed_document: Any,
-    kb_sn: str,
+    knowledge_base_asset_id: str,
     asset_name: str,
     doc_id: str,
     upload_content: Callable[[str, str], str],
 ) -> Dict[str, Any]:
     return _persist_structured_artifacts(
         parsed_document,
-        build_structured_markdown_artifact_prefix(kb_sn, asset_name, doc_id),
+        build_structured_markdown_artifact_prefix(knowledge_base_asset_id, asset_name, doc_id),
         STRUCTURED_MARKDOWN_ARTIFACTS_KEY,
         STRUCTURED_MARKDOWN_METADATA_KEY,
         upload_content,
@@ -205,7 +248,7 @@ def persist_structured_markdown_artifacts(
 
 def persist_parsed_markdown_artifact(
     parsed_document: Any,
-    kb_sn: str,
+    knowledge_base_asset_id: str,
     asset_name: str,
     doc_id: str,
     upload_content: Callable[[str, str], str],
@@ -213,7 +256,7 @@ def persist_parsed_markdown_artifact(
     document_markdown = _parsed_document_markdown(parsed_document)
     if not document_markdown:
         return {}
-    prefix = build_parsed_markdown_artifact_prefix(kb_sn, asset_name, doc_id)
+    prefix = build_parsed_markdown_artifact_prefix(knowledge_base_asset_id, asset_name, doc_id)
     document_key = prefix + "document.md"
     upload_content(document_key, document_markdown)
     summary = _parsed_markdown_summary(prefix, document_key, parsed_document)

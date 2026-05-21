@@ -46,6 +46,8 @@ from rag_service.document_loaders.parsed_blocks import (
     documents_to_parsed_blocks,
 )
 from rag_service.document_loaders.structured_artifacts import (
+    build_knowledge_base_asset_artifact_prefix,
+    is_safe_knowledge_base_asset_artifact_prefix,
     merge_structured_metadata,
     merge_structured_docx_metadata,
     persist_parsed_markdown_artifact,
@@ -185,17 +187,31 @@ def delete_knowledge_base_asset_resources(context: OpExecutionContext):
         knowledge_base_asset = get_knowledge_base_asset(
             session, knowledge_base_serial_number, knowledge_base_asset_name
         )
+        asset_artifact_prefix = build_knowledge_base_asset_artifact_prefix(str(knowledge_base_asset.id))
+        if is_safe_knowledge_base_asset_artifact_prefix(asset_artifact_prefix):
+            delete_dir(asset_artifact_prefix)
+        else:
+            logger.warning("Skip unsafe knowledge base asset artifact prefix deletion: %s", asset_artifact_prefix)
         for vector_store in knowledge_base_asset.vector_stores:
-            delete_vector_store_resources(vector_store, delete_download_key=knowledge_base_asset.save_file)
+            delete_vector_store_resources(
+                vector_store,
+                delete_download_key=knowledge_base_asset.save_file,
+                covered_artifact_prefixes=(asset_artifact_prefix,),
+            )
 
 
-def delete_vector_store_resources(vector_store: VectorStore, delete_download_key: bool = True):
+def delete_vector_store_resources(
+    vector_store: VectorStore,
+    delete_download_key: bool = True,
+    covered_artifact_prefixes: Tuple[str, ...] = (),
+):
     delete_external_vector_store_resources(
         vector_store,
         delete_download_key=delete_download_key,
         delete_object_func=delete_object,
         delete_dir_func=delete_dir,
         logger=logger,
+        covered_artifact_prefixes=covered_artifact_prefixes,
     )
 
 
@@ -355,6 +371,7 @@ def parse_original_documents(
         knowledge_base_asset = get_knowledge_base_asset(
             session, knowledge_base_serial_number, knowledge_base_asset_name
         )
+        knowledge_base_asset_id = str(knowledge_base_asset.id)
         asset_type = knowledge_base_asset.asset_type
         vectorization_config = VectorizationConfig(**knowledge_base_asset.vectorization_config)
 
@@ -370,7 +387,12 @@ def parse_original_documents(
         return parsed_documents
 
     for original_document in original_documents:
-        parsed_document = parse_file(original_document, vectorization_config, asset_type)
+        parsed_document = parse_file(
+            original_document,
+            vectorization_config,
+            asset_type,
+            knowledge_base_asset_id=knowledge_base_asset_id,
+        )
         parsed_documents.append((original_document, parsed_document))
     return parsed_documents
 
@@ -380,10 +402,17 @@ def save_parsed_documents(
     context: OpExecutionContext, parsed_documents: List[Tuple[OriginalDocument, ParsedDocument]]
 ) -> List[Tuple[OriginalDocument, ParsedDocument]]:
     knowledge_base_serial_number, knowledge_base_asset_name = parse_asset_partition_key(context.partition_key)
+    if not parsed_documents:
+        return parsed_documents
+    with Session(engine) as session:
+        knowledge_base_asset = get_knowledge_base_asset(
+            session, knowledge_base_serial_number, knowledge_base_asset_name
+        )
+        knowledge_base_asset_id = str(knowledge_base_asset.id)
     artifact_summaries = {}
     for original_document, parsed_document in parsed_documents:
         artifact_info = _persist_parsed_document_artifacts(
-            knowledge_base_serial_number,
+            knowledge_base_asset_id,
             knowledge_base_asset_name,
             original_document,
             parsed_document,
@@ -398,7 +427,7 @@ def save_parsed_documents(
 
 
 def _persist_parsed_document_artifacts(
-    knowledge_base_serial_number: str,
+    knowledge_base_asset_id: str,
     knowledge_base_asset_name: str,
     original_document: OriginalDocument,
     parsed_document: ParsedDocument,
@@ -406,7 +435,7 @@ def _persist_parsed_document_artifacts(
     for persist_func, metadata_key in _artifact_persisters():
         summary = persist_func(
             parsed_document,
-            knowledge_base_serial_number,
+            knowledge_base_asset_id,
             knowledge_base_asset_name,
             str(original_document.doc_id),
             upload_file_as_bytes,
