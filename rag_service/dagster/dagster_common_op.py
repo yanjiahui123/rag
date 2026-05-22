@@ -1,7 +1,6 @@
 import itertools
 import json
 import pickle
-import re
 import shutil
 import uuid
 from pathlib import Path
@@ -35,6 +34,7 @@ from rag_service.corpus_detections.similar_doument_detector import SimilarDocume
 from rag_service.corpus_detections.url_validation_detector import UrlValidityDetector
 from rag_service.database import engine
 from rag_service.dagster.ipd_rag_payload import (
+    normalize_slices_for_dataops,
     send_document_entries_to_dataops,
     split_document_entry_for_dataops,
 )
@@ -1098,52 +1098,6 @@ def delete_documents_info(context: OpExecutionContext):
         shutil.rmtree(documents_info_dir)
 
 
-def clean_table_text(text: str) -> str:
-    """清理表格结构，提取纯文本内容"""
-    lines = [line.strip() for line in text.splitlines() if line.strip()]
-    cleaned_lines = []
-    for line in lines:
-        cells = [cell.strip() for cell in line.split("|") if cell.strip()]
-        if cells:
-            cleaned_lines.append(" ".join(cells))
-    return "\n".join(cleaned_lines)
-
-
-def split_text(general_text: str, extended_metadata: str, slice_entry_list: List[Dict[str, Any]]):
-    cleaned_text = clean_table_text(general_text)
-    if not cleaned_text.strip():
-        return
-
-    sentences = []
-    for s in re.split(r"(?<=[.!?。？！])\s*", cleaned_text):
-        stripped = s.strip()
-        if stripped:
-            sentences.append(stripped)
-    current_block = []
-    current_length = 0
-    for sentence in sentences:
-        sentence_length = len(sentence)
-        # 尝试将当前句子加入当前块
-        if current_length + sentence_length > 5120:
-            # 当前块已满，保存并开始新块
-            temp_text = "".join(current_block)
-            if not temp_text:
-                continue
-            slice_entry_list.append({
-                "text": temp_text,
-                "meta_data": {"extended_metadata": get_doc_metadata(extended_metadata)},
-            })
-            current_block = [sentence]
-            current_length = sentence_length
-        else:
-            current_block.append(sentence)
-            current_length += sentence_length
-    if current_block:
-        temp_text = "".join(current_block)
-        if temp_text:
-            slice_entry_list.append({"text": temp_text, "meta_data": {"extended_metadata": get_doc_metadata(extended_metadata)}})
-
-
 def get_doc_metadata(extended_metadata: str):
     dic = deserialize(extended_metadata)
     return {k: v for k, v in dic.items() if k != "header_contents"}
@@ -1162,14 +1116,12 @@ def create_document_entry(
             general_text = data.general_text.strip()
             if not general_text:
                 continue
-            if len(general_text) > 5120:
-                split_text(general_text, data.extended_metadata, slice_entry_list)
-            else:
-                slice_entry = {
-                    "text": general_text,
-                    "meta_data": {"extended_metadata": get_doc_metadata(data.extended_metadata)},
-                }
-                slice_entry_list.append(slice_entry)
+            slice_entry = {
+                "text": general_text,
+                "meta_data": {"extended_metadata": get_doc_metadata(data.extended_metadata)},
+            }
+            slice_entry_list.append(slice_entry)
+    slice_entry_list = normalize_slices_for_dataops(slice_entry_list)
     if not slice_entry_list:
         slice_entry_list = [
             {
