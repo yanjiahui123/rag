@@ -34,6 +34,7 @@ from rag_service.corpus_detections.similar_doument_detector import SimilarDocume
 from rag_service.corpus_detections.url_validation_detector import UrlValidityDetector
 from rag_service.database import engine
 from rag_service.dagster.ipd_rag_payload import (
+    dataops_document_part_name,
     normalize_slices_for_dataops,
     send_document_entries_to_dataops,
     split_document_entry_for_dataops,
@@ -989,11 +990,10 @@ def _append_large_document_entries(
 ):
     ipd_rag_document_list = []
     count = 0
-    current_document_name = document_name
     while slice_list:
         count += 1
         document_id = str(uuid.uuid4())
-        current_document_name = current_document_name + "_" + str(count)
+        current_document_name = dataops_document_part_name(document_name, count, suffix_first=True)
         ipd_rag_document_list.append({"document_name": current_document_name, "document_id": document_id})
         document_entry = create_document_entry(document_id, source, current_document_name, DATAOPS_OPERATION_INSERT,
                                                slice_list)

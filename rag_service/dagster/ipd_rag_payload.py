@@ -96,6 +96,13 @@ def dataops_slice_payload_size(slice_entry: Dict[str, Any]) -> int:
     return len(payload.encode("utf-8"))
 
 
+def dataops_document_part_name(document_name: str, part_index: int, suffix_first: bool = False) -> str:
+    if part_index <= 1 and not suffix_first:
+        return document_name
+    stem, extension = os.path.splitext(str(document_name or "document"))
+    return f"{stem}_{part_index}{extension}"
+
+
 def normalize_document_entry_for_dataops(
     document_entry: DocumentEntry,
     max_slice_text_chars: Optional[int] = None,
@@ -450,7 +457,7 @@ def _build_document_entry_part(
         return part
 
     part_id = document_id_factory()
-    part_name = f"{document_entry.get('filename', '')}_{part_index}"
+    part_name = dataops_document_part_name(document_entry.get("filename", ""), part_index)
     part["id"] = part_id
     part["filename"] = part_name
     part["title"] = part_name
