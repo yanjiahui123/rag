@@ -42,6 +42,7 @@ def build_vector_store_resource_deletion_plan(
     delete_download_key: bool = True,
     covered_artifact_prefixes: Sequence[str] = (),
 ) -> VectorStoreResourceDeletionPlan:
+    covered_artifact_prefixes = tuple(covered_artifact_prefixes)
     download_keys: List[str] = []
     artifact_prefixes: List[str] = []
     unsafe_artifact_prefixes: List[str] = []
@@ -52,31 +53,27 @@ def build_vector_store_resource_deletion_plan(
     seen_image_object_keys = set()
 
     for original_document in vector_store.original_documents:
-        download_key = original_document.download_key
-        if (
-            delete_download_key
-            and download_key
-            and not _is_covered_by_prefix(str(download_key), covered_artifact_prefixes)
-        ):
-            _append_unique(
-                download_keys,
-                seen_download_keys,
-                download_key,
-            )
-
         extended_metadata = original_document.extended_metadata
-        for artifact_prefix in _artifact_prefixes_to_delete(extended_metadata):
-            if not artifact_prefix:
-                continue
-            if is_safe_structured_artifact_prefix(artifact_prefix):
-                if _is_covered_by_prefix(artifact_prefix, covered_artifact_prefixes):
-                    continue
-                _append_unique(artifact_prefixes, seen_artifact_prefixes, artifact_prefix)
-            else:
-                _append_unique(unsafe_artifact_prefixes, seen_unsafe_artifact_prefixes, artifact_prefix)
-
-        for image_object_key in extract_structured_image_object_keys(extended_metadata):
-            _append_unique(image_object_keys, seen_image_object_keys, image_object_key)
+        _append_download_key_to_plan(
+            original_document.download_key,
+            delete_download_key,
+            covered_artifact_prefixes,
+            download_keys,
+            seen_download_keys,
+        )
+        _append_artifact_prefixes_to_plan(
+            extended_metadata,
+            covered_artifact_prefixes,
+            artifact_prefixes,
+            unsafe_artifact_prefixes,
+            seen_artifact_prefixes,
+            seen_unsafe_artifact_prefixes,
+        )
+        _append_image_object_keys_to_plan(
+            extended_metadata,
+            image_object_keys,
+            seen_image_object_keys,
+        )
 
     filtered_image_object_keys = tuple(
         image_object_key
@@ -90,6 +87,66 @@ def build_vector_store_resource_deletion_plan(
         image_object_keys=filtered_image_object_keys,
         unsafe_artifact_prefixes=tuple(unsafe_artifact_prefixes),
     )
+
+
+def _append_download_key_to_plan(
+    download_key: Optional[str],
+    delete_download_key: bool,
+    covered_artifact_prefixes: Sequence[str],
+    download_keys: List[str],
+    seen_download_keys: set,
+) -> None:
+    if not delete_download_key or not download_key:
+        return
+    if _is_covered_by_prefix(str(download_key), covered_artifact_prefixes):
+        return
+    _append_unique(download_keys, seen_download_keys, download_key)
+
+
+def _append_artifact_prefixes_to_plan(
+    extended_metadata: Optional[Dict[str, Any]],
+    covered_artifact_prefixes: Sequence[str],
+    artifact_prefixes: List[str],
+    unsafe_artifact_prefixes: List[str],
+    seen_artifact_prefixes: set,
+    seen_unsafe_artifact_prefixes: set,
+) -> None:
+    for artifact_prefix in _artifact_prefixes_to_delete(extended_metadata):
+        _append_artifact_prefix_to_plan(
+            artifact_prefix,
+            covered_artifact_prefixes,
+            artifact_prefixes,
+            unsafe_artifact_prefixes,
+            seen_artifact_prefixes,
+            seen_unsafe_artifact_prefixes,
+        )
+
+
+def _append_artifact_prefix_to_plan(
+    artifact_prefix: Optional[str],
+    covered_artifact_prefixes: Sequence[str],
+    artifact_prefixes: List[str],
+    unsafe_artifact_prefixes: List[str],
+    seen_artifact_prefixes: set,
+    seen_unsafe_artifact_prefixes: set,
+) -> None:
+    if not artifact_prefix:
+        return
+    if not is_safe_structured_artifact_prefix(artifact_prefix):
+        _append_unique(unsafe_artifact_prefixes, seen_unsafe_artifact_prefixes, artifact_prefix)
+        return
+    if _is_covered_by_prefix(artifact_prefix, covered_artifact_prefixes):
+        return
+    _append_unique(artifact_prefixes, seen_artifact_prefixes, artifact_prefix)
+
+
+def _append_image_object_keys_to_plan(
+    extended_metadata: Optional[Dict[str, Any]],
+    image_object_keys: List[str],
+    seen_image_object_keys: set,
+) -> None:
+    for image_object_key in extract_structured_image_object_keys(extended_metadata):
+        _append_unique(image_object_keys, seen_image_object_keys, image_object_key)
 
 
 def delete_vector_store_resources(

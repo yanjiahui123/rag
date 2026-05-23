@@ -226,15 +226,16 @@ def _normalize_slice_for_dataops(
     text = str(compacted_slice.get("text") or "").strip()
     if not text:
         return []
-    return [
-        _copy_slice_with_text(compacted_slice, text_part)
-        for text_part in _split_text_for_dataops(
-            text,
-            compacted_slice,
-            max_slice_text_chars,
-            max_slice_bytes,
-        )
-    ]
+    normalized_slices: List[Dict[str, Any]] = []
+    text_parts = _split_text_for_dataops(
+        text,
+        compacted_slice,
+        max_slice_text_chars,
+        max_slice_bytes,
+    )
+    for text_part in text_parts:
+        normalized_slices.append(_copy_slice_with_text(compacted_slice, text_part))
+    return normalized_slices
 
 
 def _compact_slice_metadata_for_dataops(slice_entry: Dict[str, Any], max_slice_bytes: int) -> Dict[str, Any]:
