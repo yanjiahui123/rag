@@ -135,14 +135,16 @@ class StructuredArtifactsBranchTests(unittest.TestCase):
         )
 
         prefix = f"{ARTIFACTS_PREFIX}/structured_html/"
-        manifest = json.loads(uploaded[prefix + "manifest.json"])
+        manifest_text = uploaded.get(prefix + "manifest.json")
+        self.assertIsNotNone(manifest_text)
+        manifest = json.loads(manifest_text)
         self.assertEqual(summary["artifact_prefix"], prefix)
         self.assertEqual(summary["table_count"], 1)
         self.assertEqual(summary[sa.IMAGE_OBJECT_KEYS_METADATA_KEY], ["image-1", "2"])
         self.assertNotIn(sa.STRUCTURED_HTML_ARTIFACTS_KEY, parsed_document.metadata)
-        self.assertEqual(uploaded[prefix + "sections/custom_id.md"], "custom intro")
-        self.assertEqual(uploaded[prefix + "sections/section_002.md"], "sales intro\n\ntable rows")
-        self.assertEqual(uploaded[prefix + "sections/section_003.md"], "loose tail")
+        self.assertEqual(uploaded.get(prefix + "sections/custom_id.md"), "custom intro")
+        self.assertEqual(uploaded.get(prefix + "sections/section_002.md"), "sales intro\n\ntable rows")
+        self.assertEqual(uploaded.get(prefix + "sections/section_003.md"), "loose tail")
         self.assertEqual(parsed_document.blocks[3].metadata["display_ref"], prefix + "tables/t1.html")
         self.assertNotIn("display_ref", parsed_document.blocks[4].metadata)
         self.assertEqual([section["section_id"] for section in manifest["sections"]], ["custom/id", "section_002", "section_003"])
@@ -178,7 +180,9 @@ class StructuredArtifactsBranchTests(unittest.TestCase):
             DOC_ID,
             lambda key, content: direct_uploads.setdefault(key, content) or key,
         )
-        self.assertEqual(direct_uploads[direct_summary["document_markdown_key"]], "direct markdown")
+        direct_markdown_key = direct_summary.get("document_markdown_key")
+        self.assertIsNotNone(direct_markdown_key)
+        self.assertEqual(direct_uploads.get(direct_markdown_key), "direct markdown")
         self.assertEqual(
             sa.extract_parsed_markdown_artifact_prefix({sa.PARSED_MARKDOWN_METADATA_KEY: direct_summary}),
             direct_summary["artifact_prefix"],
@@ -193,7 +197,9 @@ class StructuredArtifactsBranchTests(unittest.TestCase):
             DOC_ID,
             lambda key, content: block_uploads.setdefault(key, content) or key,
         )
-        self.assertEqual(block_uploads[block_summary["document_markdown_key"]], "one\n\ntwo")
+        block_markdown_key = block_summary.get("document_markdown_key")
+        self.assertIsNotNone(block_markdown_key)
+        self.assertEqual(block_uploads.get(block_markdown_key), "one\n\ntwo")
         self.assertEqual(block_summary["block_count"], 3)
 
 

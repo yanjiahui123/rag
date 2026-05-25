@@ -157,7 +157,11 @@ class StructuredDocxLoaderBranchTests(unittest.TestCase):
         self.assertEqual(sd._related_parts(object(), owned), {"block": 2})
         self.assertEqual(sd._related_parts(object(), object()), {})
         fake_section_loader = ModuleType("rag_service.document_loaders.docx_section_loader")
-        fake_section_loader.iter_block_items = lambda document: ["fallback"]
+
+        def iter_fallback_blocks(_document):
+            return ["fallback"]
+
+        fake_section_loader.iter_block_items = iter_fallback_blocks
         with patch.dict(sys.modules, {"rag_service.document_loaders.docx_section_loader": fake_section_loader}):
             self.assertEqual(loader._iter_blocks(object()), ["fallback"])
 
@@ -177,7 +181,12 @@ class StructuredDocxLoaderBranchTests(unittest.TestCase):
 
         opened = []
         fake_docx = ModuleType("docx")
-        fake_docx.Document = lambda path: opened.append(path) or "opened document"
+
+        def open_document(path):
+            opened.append(path)
+            return "opened document"
+
+        fake_docx.Document = open_document
         with patch.dict(sys.modules, {"docx": fake_docx}):
             self.assertEqual(sd.StructuredDocxLoader("input.docx")._open_document(), "opened document")
         self.assertEqual(opened, ["input.docx"])
