@@ -30,7 +30,14 @@ def search_slices(
     req: SearchSlicesRequest,
     session: Any = Depends(yield_session),
 ) -> dict:
-    return _dump(_service().search_slices(req, uid=_request_uid(request, req), session=session))
+    return _dump(
+        _service().search_slices(
+            req,
+            uid=_request_uid(request, req),
+            session=session,
+            request_id=_request_id(request),
+        )
+    )
 
 
 @router.post("/get_document_outline", response_model=None)
@@ -66,6 +73,14 @@ def _request_uid(request: Request, req: Any) -> str:
     if not uid:
         raise HTTPException(status_code=401, detail="authenticated user is required")
     return str(uid)
+
+
+def _request_id(request: Request) -> Optional[str]:
+    headers = getattr(request, "headers", None)
+    if headers is None:
+        return None
+    value = headers.get("X-Request-ID") or headers.get("x-request-id")
+    return str(value) if value else None
 
 
 def _service() -> AgentRetrievalService:

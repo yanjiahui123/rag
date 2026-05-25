@@ -137,7 +137,7 @@ def test_default_libing_multi_kb_searches_grouped_indexes_and_deduplicates(self)
     self.assertEqual(outcome.diagnostics["libing_analyzer_group_count"], 2)
 ```
 
-Retain and update the current single-KB stub test to verify a legacy Libing request calls `get_embedding_model_and_vector_stores()` and does not require grouped lookup.
+Retain and update the current single-KB stub test to verify a legacy Libing request calls `get_embedding_model_and_vector_stores()`, does not require grouped lookup, and does not apply the multi-KB text deduplication step.
 
 - [ ] **Step 2: Run Libing tests to verify failure**
 

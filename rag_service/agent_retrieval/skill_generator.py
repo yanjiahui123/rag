@@ -24,6 +24,8 @@ def generate_opencode_skill_package(
         "utf8_output": True,
         "query": "",
         "top_k": 20,
+        "retrieval_backend": "libing",
+        "enable_rerank": False,
     }
     return SkillPackageResponse(
         files={
@@ -127,7 +129,9 @@ export KB_SN_LIST="{kb_text}"
   "pretty": true,
   "utf8_output": true,
   "query": "USER_QUERY_HERE",
-  "top_k": 20
+  "top_k": 20,
+  "retrieval_backend": "libing",
+  "enable_rerank": false
 }}
 ```
 
@@ -204,7 +208,9 @@ python .opencode/skills/kb-retrieval/scripts/kb_retrieval_request.py
 python .opencode/skills/kb-retrieval/scripts/kb_retrieval_request.py
 ```
 
-6. If results are weak, rewrite the query locally and search again.
+6. Use `"retrieval_backend": "ipd"` only when the selected knowledge bases are mapped to IPD RAG. Set `"enable_rerank": true` when higher-quality ordering is worth expanding retrieval to 100 candidates before returning the requested `top_k`.
+
+7. If results are weak, rewrite the query locally and search again.
 
 Only answer with facts grounded in returned slices, sections, tables, or original text. Cite document titles and section/table names when available.
 
@@ -231,10 +237,12 @@ Base path: `/agent/retrieval`
 Body:
 
 ```json
-{"uid": "employee-id", "query": "question", "kb_sn_list": ["kb-1"], "top_k": 20}
+{"uid": "employee-id", "query": "question", "kb_sn_list": ["kb-1"], "top_k": 20, "retrieval_backend": "libing", "enable_rerank": false}
 ```
 
 Returns ranked slices with document metadata, location metadata, action flags, and short OBS-key handles.
+
+`retrieval_backend` is either `libing` or `ipd` and selects exactly one retrieval system for a request. When `enable_rerank` is true, retrieval expands to 100 candidates before returning the requested result limit.
 
 ## `POST /get_document_outline`
 
@@ -301,6 +309,8 @@ def main(argv=None):
     search = subparsers.add_parser("search")
     search.add_argument("--query", required=True)
     search.add_argument("--top-k", type=int, default=20)
+    search.add_argument("--retrieval-backend", choices=["libing", "ipd"], default="libing")
+    search.add_argument("--enable-rerank", action="store_true")
 
     outline = subparsers.add_parser("outline")
     outline.add_argument("--document-handle", required=True)
@@ -358,7 +368,14 @@ def default_config_path():
 
 def build_payload(args, config):
     if args.command == "search":
-        return {"uid": config.get("uid"), "query": args.query, "kb_sn_list": config.get("kb_sn_list", []), "top_k": args.top_k}
+        return {
+            "uid": config.get("uid"),
+            "query": args.query,
+            "kb_sn_list": config.get("kb_sn_list", []),
+            "top_k": args.top_k,
+            "retrieval_backend": args.retrieval_backend,
+            "enable_rerank": args.enable_rerank,
+        }
     if args.command == "outline":
         return {"uid": config.get("uid"), "document_handle": args.document_handle}
     if args.command == "section":
@@ -477,6 +494,9 @@ def build_argv(request):
     if command == "search":
         argv.extend(["--query", require(request, "query")])
         argv.extend(["--top-k", str(request.get("top_k", request.get("top-k", 20)))])
+        argv.extend(["--retrieval-backend", request.get("retrieval_backend", "libing")])
+        if request.get("enable_rerank", False):
+            argv.append("--enable-rerank")
     elif command == "outline":
         argv.extend(["--document-handle", require(request, "document_handle")])
     elif command == "section":

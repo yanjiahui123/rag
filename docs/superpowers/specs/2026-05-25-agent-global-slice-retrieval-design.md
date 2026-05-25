@@ -37,14 +37,14 @@ For every `search_slices` request:
 2. Set `final_top_k = clamp(request.top_k, 1, 50)`.
 3. Set `candidate_top_k = 100` when `enable_rerank` is true; otherwise use `final_top_k`.
 4. Dispatch only to the selected `retrieval_backend`.
-5. Remove exact duplicate slice texts before final selection.
+5. Remove exact duplicate slice texts before final selection for IPD and multi-KB Libing retrieval; preserve legacy single-KB Libing selection behavior.
 6. If reranking is enabled, rerank the candidate list once and return at most `final_top_k`; otherwise sort by backend score descending and return at most `final_top_k`.
 7. Convert candidates through the existing agent slice projection so artifact handles are returned where metadata supports them.
 8. Persist a retrieval log record and return `request_id` with the slices.
 
 ## Libing RAG Backend
 
-For a single authorized KB, continue using its local vector-store configuration and indexes, with `candidate_top_k` passed as the requested retrieval size.
+For a single authorized KB, continue using its local vector-store configuration and indexes, with `candidate_top_k` passed as the requested retrieval size. This compatibility path does not introduce the new cross-KB text deduplication step.
 
 For multiple authorized KBs:
 
@@ -71,7 +71,7 @@ For `retrieval_backend="ipd"`:
 
 - When false, neither backend is reranked; raw backend scores determine output order.
 - When true, either backend retrieves up to 100 candidates, applies the existing rerank service once, and returns the highest ranked `final_top_k` candidates.
-- The endpoint reuses the established default multi-KB rerank model selection rather than exposing a model parameter.
+- The endpoint reuses established retrieval configuration selection rather than exposing a model parameter: a single KB uses its KB configuration, and multiple KBs use the shared multi-KB configuration.
 - If rerank invocation fails and the existing fallback returns backend candidates, the response remains usable and the diagnostic log records rerank degradation.
 
 ## Agent Handles
@@ -129,7 +129,7 @@ For Libing multi-KB retrieval, diagnostics additionally record the number of ana
 Focused tests must prove:
 
 1. Legacy requests default to Libing without reranking and now return a `request_id`.
-2. Libing retrieval uses the existing single-KB path for one KB and grouped global retrieval for multiple KBs.
+2. Libing retrieval uses the existing single-KB selection behavior for one KB and grouped global retrieval plus text deduplication for multiple KBs.
 3. Duplicate slices across Libing groups are removed before selecting final results.
 4. Selecting IPD avoids Elasticsearch retrieval, passes only mapped IDs, skips/logs unmapped KBs, and returns empty output when none map.
 5. With reranking disabled, candidate retrieval uses bounded `final_top_k`.

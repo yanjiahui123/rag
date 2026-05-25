@@ -16,6 +16,8 @@ class SearchSlicesRequest(AgentRetrievalRequest):
     top_k: int = 20
     include_refs: bool = True
     include_artifact_handles: bool = True
+    retrieval_backend: Literal["libing", "ipd"] = "libing"
+    enable_rerank: bool = False
 
 
 class DocumentSummary(BaseModel):
@@ -63,6 +65,7 @@ class SearchSlice(BaseModel):
 
 
 class SearchSlicesResponse(BaseModel):
+    request_id: str
     query: str
     kb_sn_list: List[str]
     slices: List[SearchSlice] = Field(default_factory=list)

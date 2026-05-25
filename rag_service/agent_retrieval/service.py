@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import json
+import logging
+import uuid
+from datetime import datetime, timezone
 from types import SimpleNamespace
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Type, TypeVar
 
@@ -44,6 +47,14 @@ TABLE_ARTIFACT_SUFFIXES = (".llm.md", ".json", ".html")
 T = TypeVar("T", bound=BaseModel)
 Retriever = Callable[[SearchSlicesRequest, str, Any], Iterable[Any]]
 ArtifactTextResolver = Callable[[str], Optional[str]]
+SearchLogWriter = Callable[[Dict[str, Any], Any], None]
+RequestIdFactory = Callable[[], str]
+logger = logging.getLogger(__name__)
+
+
+class RetrievalOutcome(BaseModel):
+    documents: List[Any]
+    diagnostics: Dict[str, Any]
 
 
 class AgentRetrievalService:
@@ -51,28 +62,94 @@ class AgentRetrievalService:
         self,
         retrieve_documents: Optional[Retriever] = None,
         artifact_text_resolver: Optional[ArtifactTextResolver] = None,
+        search_log_writer: Optional[SearchLogWriter] = None,
+        request_id_factory: Optional[RequestIdFactory] = None,
     ):
+        self.uses_default_retriever = retrieve_documents is None
         self.retrieve_documents = retrieve_documents or _default_retrieve_documents
         self.artifact_text_resolver = artifact_text_resolver or _default_artifact_text_resolver
+        self.search_log_writer = search_log_writer or _default_search_log_writer
+        self.request_id_factory = request_id_factory or (lambda: uuid.uuid4().hex)
 
     def search_slices(
         self,
         request: SearchSlicesRequest,
         uid: str,
         session: Any = None,
+        request_id: Optional[str] = None,
     ) -> SearchSlicesResponse:
         request = _coerce_model(SearchSlicesRequest, request)
+        request_id = request_id or self.request_id_factory()
         top_k = _bounded_top_k(request.top_k)
-        documents = list(self.retrieve_documents(request, uid, session) or [])
-        documents = sorted(documents, key=_document_score, reverse=True)[:top_k]
+        started_at = _utcnow()
+        retrieve_started_at = _utcnow()
+        diagnostics = _base_search_diagnostics(request, top_k)
+        try:
+            documents = self._search_documents(request, uid, session, top_k, diagnostics)
+            response = self._search_response(request_id, request, documents, uid)
+        except Exception as exc:
+            self._record_search_result(
+                request_id, uid, request, None, diagnostics, started_at, retrieve_started_at, session, str(exc)
+            )
+            raise
+        diagnostics["returned_slice_count"] = len(response.slices)
+        self._record_search_result(
+            request_id, uid, request, response, diagnostics, started_at, retrieve_started_at, session
+        )
+        return response
+
+    def _search_documents(
+        self,
+        request: SearchSlicesRequest,
+        uid: str,
+        session: Any,
+        top_k: int,
+        diagnostics: Dict[str, Any],
+    ) -> List[Any]:
+        if self.uses_default_retriever:
+            outcome = _default_retrieve_outcome(request, uid, session)
+            diagnostics.update(outcome.diagnostics)
+            return outcome.documents
+        candidates = list(self.retrieve_documents(request, uid, session) or [])
+        diagnostics.update(
+            {"candidate_count_before_dedup": len(candidates), "candidate_count_after_dedup": len(candidates)}
+        )
+        return sorted(candidates, key=_document_score, reverse=True)[:top_k]
+
+    def _search_response(
+        self, request_id: str, request: SearchSlicesRequest, documents: List[Any], uid: str
+    ) -> SearchSlicesResponse:
         return SearchSlicesResponse(
+            request_id=request_id,
             query=request.query,
             kb_sn_list=_request_kb_sn_list(request),
-            slices=[
-                self._search_slice(document, rank=rank, uid=uid)
-                for rank, document in enumerate(documents, start=1)
-            ],
+            slices=[self._search_slice(document, rank=rank, uid=uid) for rank, document in enumerate(documents, start=1)],
         )
+
+    def _record_search_result(
+        self,
+        request_id: str,
+        uid: str,
+        request: SearchSlicesRequest,
+        response: Optional[SearchSlicesResponse],
+        diagnostics: Dict[str, Any],
+        started_at: datetime,
+        retrieve_started_at: datetime,
+        session: Any,
+        error_reason: Optional[str] = None,
+    ) -> None:
+        self._write_search_log(
+            _search_log_record(
+                request_id, uid, request, response, diagnostics, started_at, retrieve_started_at, _utcnow(), error_reason
+            ),
+            session,
+        )
+
+    def _write_search_log(self, record: Dict[str, Any], session: Any) -> None:
+        try:
+            self.search_log_writer(record, session)
+        except Exception as exc:
+            logger.warning("agent search_slices log persistence failed: %s", exc)
 
     def get_document_outline(
         self,
@@ -260,40 +337,163 @@ class AgentRetrievalService:
 
 
 def _default_retrieve_documents(request: SearchSlicesRequest, uid: str, session: Any = None) -> Iterable[Any]:
+    return _default_retrieve_outcome(request, uid, session).documents
+
+
+def _default_retrieve_outcome(request: SearchSlicesRequest, uid: str, session: Any = None) -> RetrievalOutcome:
     if session is None:
         raise RuntimeError("agent retrieval search requires a database session when no retriever is injected")
     from rag_service.rag_app.service import knowledge_base_service
 
     kb_sn_list = _request_kb_sn_list(request)
     knowledge_bases = knowledge_base_service.permission_judge(session, kb_sn_list, uid)
-    query_request = SimpleNamespace(
+    final_top_k = _bounded_top_k(request.top_k)
+    candidate_top_k = _candidate_top_k(request)
+    diagnostics = _base_search_diagnostics(request, final_top_k)
+    query_request = _agent_query_request(request, uid, kb_sn_list, candidate_top_k)
+    if not knowledge_bases:
+        return _empty_retrieval_outcome(diagnostics)
+    retrieve_config = _agent_retrieve_config(knowledge_base_service, knowledge_bases, query_request)
+    documents = _agent_backend_documents(
+        knowledge_base_service, request, session, knowledge_bases, query_request, retrieve_config, diagnostics
+    )
+    return _finalize_retrieval_outcome(
+        knowledge_base_service,
+        request,
+        knowledge_bases,
+        query_request,
+        retrieve_config,
+        documents,
+        diagnostics,
+    )
+
+
+def _agent_query_request(
+    request: SearchSlicesRequest, uid: str, kb_sn_list: List[str], candidate_top_k: int
+) -> SimpleNamespace:
+    return SimpleNamespace(
         question=request.query,
         kb_sn=None,
         kb_sn_list=kb_sn_list,
         uid=uid,
-        top_k=_bounded_top_k(request.top_k),
+        top_k=candidate_top_k,
         request_id=None,
         user_custom_retrieve_config=None,
         historical_questions=[],
     )
-    documents = []
-    manager = knowledge_base_service.get_vector_store_manager()
-    for knowledge_base in knowledge_bases:
-        retrieve_config = knowledge_base_service.get_retrieve_param_by_kb_config_and_request(knowledge_base, query_request)
-        documents.extend(
-            manager.retrieve(
-                query_request.question,
-                retrieve_config.top_k,
-                knowledge_base_service.get_embedding_model_and_vector_stores(session, knowledge_base.sn),
-                retrieve_config.document_score_threshold,
-                collect_info=False,
-                analyzer=knowledge_base.analyzer,
-                query_strategy=retrieve_config.query_strategy,
-                request_id=None,
-                background_tasks=None,
-            )
+
+
+def _empty_retrieval_outcome(diagnostics: Dict[str, Any]) -> RetrievalOutcome:
+    diagnostics.update(
+        {"libing_analyzer_group_count": 0, "candidate_count_before_dedup": 0, "candidate_count_after_dedup": 0}
+    )
+    return RetrievalOutcome(documents=[], diagnostics=diagnostics)
+
+
+def _agent_retrieve_config(knowledge_base_service: Any, knowledge_bases: List[Any], query_request: Any) -> Any:
+    if len(knowledge_bases) == 1:
+        return knowledge_base_service.get_retrieve_param_by_kb_config_and_request(knowledge_bases[0], query_request)
+    return knowledge_base_service.get_multi_kb_retrieve_param(knowledge_bases, query_request)
+
+
+def _agent_backend_documents(
+    knowledge_base_service: Any,
+    request: SearchSlicesRequest,
+    session: Any,
+    knowledge_bases: List[Any],
+    query_request: Any,
+    retrieve_config: Any,
+    diagnostics: Dict[str, Any],
+) -> List[Any]:
+    if request.retrieval_backend == "ipd":
+        return _agent_ipd_documents(knowledge_base_service, knowledge_bases, query_request, retrieve_config, diagnostics)
+    return _agent_libing_documents(knowledge_base_service, session, knowledge_bases, query_request, retrieve_config, diagnostics)
+
+
+def _agent_ipd_documents(
+    knowledge_base_service: Any,
+    knowledge_bases: List[Any],
+    query_request: Any,
+    retrieve_config: Any,
+    diagnostics: Dict[str, Any],
+) -> List[Any]:
+    mapped_kbs = [knowledge_base for knowledge_base in knowledge_bases if getattr(knowledge_base, "ipd_rag_kb_id", None)]
+    diagnostics["ipd_mapped_kb_sn_list"] = [knowledge_base.sn for knowledge_base in mapped_kbs]
+    diagnostics["ipd_skipped_unmapped_kb_sn_list"] = [
+        knowledge_base.sn for knowledge_base in knowledge_bases if knowledge_base not in mapped_kbs
+    ]
+    if not mapped_kbs:
+        return []
+    return list(
+        knowledge_base_service.retrieve_documents_from_ipd_rag(
+            query_request.question, query_request.top_k, retrieve_config.query_strategy, mapped_kbs
         )
-    return sorted(documents, key=_document_score, reverse=True)[: query_request.top_k]
+    )
+
+
+def _agent_libing_documents(
+    knowledge_base_service: Any,
+    session: Any,
+    knowledge_bases: List[Any],
+    query_request: Any,
+    retrieve_config: Any,
+    diagnostics: Dict[str, Any],
+) -> List[Any]:
+    manager = knowledge_base_service.get_vector_store_manager()
+    if len(knowledge_bases) == 1:
+        diagnostics["libing_analyzer_group_count"] = 1
+        stores = knowledge_base_service.get_embedding_model_and_vector_stores(session, knowledge_bases[0].sn)
+        return _agent_libing_group_documents(manager, query_request, retrieve_config, stores, knowledge_bases[0].analyzer)
+    grouped_stores = knowledge_base_service.get_grouped_vector_stores_by_knowledge_base_and_asset(
+        session, {knowledge_base.sn: [] for knowledge_base in knowledge_bases}
+    )
+    diagnostics["libing_analyzer_group_count"] = len(grouped_stores)
+    documents = []
+    for analyzer, stores in grouped_stores.items():
+        documents.extend(_agent_libing_group_documents(manager, query_request, retrieve_config, stores, analyzer))
+    return documents
+
+
+def _agent_libing_group_documents(
+    manager: Any, query_request: Any, retrieve_config: Any, stores: Any, analyzer: Any
+) -> List[Any]:
+    return list(
+        manager.retrieve(
+            query_request.question,
+            retrieve_config.top_k,
+            stores,
+            retrieve_config.document_score_threshold,
+            collect_info=False,
+            analyzer=analyzer,
+            query_strategy=retrieve_config.query_strategy,
+            request_id=None,
+            background_tasks=None,
+        )
+    )
+
+
+def _finalize_retrieval_outcome(
+    knowledge_base_service: Any,
+    request: SearchSlicesRequest,
+    knowledge_bases: List[Any],
+    query_request: Any,
+    retrieve_config: Any,
+    documents: List[Any],
+    diagnostics: Dict[str, Any],
+) -> RetrievalOutcome:
+    diagnostics["candidate_count_before_dedup"] = len(documents)
+    should_deduplicate = request.retrieval_backend == "ipd" or len(knowledge_bases) > 1
+    unique_documents = _deduplicate_documents(documents) if should_deduplicate else list(documents)
+    diagnostics["candidate_count_after_dedup"] = len(unique_documents)
+    if request.enable_rerank and unique_documents:
+        rerank_candidates = sorted(unique_documents, key=_document_score, reverse=True)[: query_request.top_k]
+        results, degraded = _rerank_documents(
+            knowledge_base_service, query_request.question, rerank_candidates, _bounded_top_k(request.top_k), retrieve_config
+        )
+        diagnostics["rerank_degraded"] = degraded
+        return RetrievalOutcome(documents=results, diagnostics=diagnostics)
+    results = sorted(unique_documents, key=_document_score, reverse=True)[: _bounded_top_k(request.top_k)]
+    return RetrievalOutcome(documents=results, diagnostics=diagnostics)
 
 
 def _default_artifact_text_resolver(object_key: str) -> Optional[str]:
@@ -302,6 +502,133 @@ def _default_artifact_text_resolver(object_key: str) -> Optional[str]:
     if not object_key:
         return None
     return download_file_as_bytes(object_key).decode("utf-8")
+
+
+def _base_search_diagnostics(request: SearchSlicesRequest, final_top_k: int) -> Dict[str, Any]:
+    return {
+        "retrieval_backend": request.retrieval_backend,
+        "enable_rerank": request.enable_rerank,
+        "requested_top_k": request.top_k,
+        "final_top_k": final_top_k,
+        "candidate_top_k": 100 if request.enable_rerank else final_top_k,
+        "kb_sn_list": _request_kb_sn_list(request),
+        "rerank_requested": request.enable_rerank,
+        "rerank_degraded": False,
+        "ipd_mapped_kb_sn_list": [],
+        "ipd_skipped_unmapped_kb_sn_list": [],
+    }
+
+
+def _candidate_top_k(request: SearchSlicesRequest) -> int:
+    return 100 if request.enable_rerank else _bounded_top_k(request.top_k)
+
+
+def _deduplicate_documents(documents: Iterable[Any]) -> List[Any]:
+    seen = set()
+    unique_documents = []
+    for document in documents:
+        text = getattr(document, "text", "")
+        if text not in seen:
+            unique_documents.append(document)
+            seen.add(text)
+    return unique_documents
+
+
+def _rerank_documents(
+    knowledge_base_service: Any,
+    question: str,
+    documents: List[Any],
+    top_k: int,
+    retrieve_config: Any,
+) -> tuple[List[Any], bool]:
+    pairs = [(question, knowledge_base_service.get_rerank_format(document)) for document in documents]
+    try:
+        scores = knowledge_base_service.rerank_embedding(pairs, retrieve_config.rerank_model)
+    except Exception as exc:
+        logger.warning("agent search_slices rerank degraded: %s", exc)
+        return sorted(documents, key=_document_score, reverse=True)[:top_k], True
+    ranked_documents = []
+    for score, document in sorted(zip(scores, documents), key=lambda item: item[0], reverse=True):
+        if score > retrieve_config.document_score_threshold and len(ranked_documents) < top_k:
+            document.score = score
+            ranked_documents.append(document)
+    return ranked_documents, False
+
+
+def _search_log_record(
+    request_id: str,
+    uid: str,
+    request: SearchSlicesRequest,
+    response: Optional[SearchSlicesResponse],
+    diagnostics: Dict[str, Any],
+    started_at: datetime,
+    retrieve_started_at: datetime,
+    ended_at: datetime,
+    error_reason: Optional[str] = None,
+) -> Dict[str, Any]:
+    retrieve_result = []
+    if response is not None:
+        retrieve_result = [_dump_model(slice_) for slice_ in response.slices]
+    return {
+        "request_id": request_id,
+        "user_id": uid,
+        "method_name": "agent.retrieval.search_slices",
+        "kb_sn": request.kb_sn,
+        "question": request.query,
+        "request_start_time": started_at,
+        "request_end_time": ended_at,
+        "request_time_use": (ended_at - started_at).total_seconds(),
+        "retrieve_start_time": retrieve_started_at,
+        "retrieve_end_time": ended_at,
+        "retrieve_time_use": (ended_at - retrieve_started_at).total_seconds(),
+        "retrieve_result": json.dumps(retrieve_result, ensure_ascii=False),
+        "error_reason": error_reason,
+        "extra_info": dict(diagnostics),
+    }
+
+
+def _default_search_log_writer(record: Dict[str, Any], session: Any) -> None:
+    if session is None:
+        return
+    from rag_service.models.database.models import RequestResponseLog
+
+    unused_response_fields = {
+        "aigc_record_id": None,
+        "load_non_stream_llm_start_time": None,
+        "load_non_stream_llm_end_time": None,
+        "load_non_stream_llm_time_use": None,
+        "load_non_stream_llm_prompt": None,
+        "load_non_stream_llm_result": None,
+        "load_stream_llm_start_time": None,
+        "load_stream_llm_end_time": None,
+        "load_stream_llm_first_token_time": None,
+        "load_stream_llm_first_token_time_use": None,
+        "load_stream_llm_time_use": None,
+        "load_stream_llm_prompt": None,
+        "load_stream_llm_result": None,
+        "answer_user_want": None,
+        "answer_source": None,
+        "acceptance": None,
+        "score": None,
+        "rewrite_question": None,
+        "question_id": None,
+    }
+    row = RequestResponseLog(**{**unused_response_fields, **record})
+    if hasattr(session, "merge"):
+        session.merge(row)
+    else:
+        session.add(row)
+    session.commit()
+
+
+def _dump_model(model: BaseModel) -> Dict[str, Any]:
+    if hasattr(model, "model_dump"):
+        return model.model_dump()
+    return model.dict()
+
+
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc)
 
 
 def _request_kb_sn_list(request: SearchSlicesRequest) -> List[str]:

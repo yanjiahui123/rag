@@ -37,14 +37,14 @@ request_id: str
 2. 计算 `final_top_k = clamp(request.top_k, 1, 50)`。
 3. 若 `enable_rerank=true`，令 `candidate_top_k = 100`；否则令其等于 `final_top_k`。
 4. 仅分发到本次请求选择的 `retrieval_backend`。
-5. 在最终选择前，按切片文本精确去重。
+5. IPD 和多 KB Libing 检索在最终选择前按切片文本精确去重；单 KB Libing 保留原有选取行为。
 6. 若启用 rerank，仅执行一次 rerank，再截取最多 `final_top_k`；否则按后端原始得分降序选择最多 `final_top_k`。
 7. 使用现有 agent slice 映射生成可用的 artifact handles。
 8. 记录检索日志，并将 `request_id` 与 slices 一并返回。
 
 ## Libing RAG 后端
 
-当只有一个已授权 KB 时，继续使用该 KB 的本地 vector-store 配置和 indexes，将 `candidate_top_k` 作为检索候选规模。
+当只有一个已授权 KB 时，继续使用该 KB 的本地 vector-store 配置和 indexes，将 `candidate_top_k` 作为检索候选规模；该兼容路径不引入新的跨库文本去重步骤。
 
 当存在多个已授权 KB 时：
 
@@ -71,7 +71,7 @@ request_id: str
 
 - 为 `false` 时，两种后端都不 rerank，按后端原始得分产生结果。
 - 为 `true` 时，两种后端都先检索最多 100 个候选，调用现有 rerank 服务一次，再返回 `final_top_k` 条最高排名结果。
-- 本端点复用现有默认多 KB rerank 模型选择，不额外暴露 `rerank_model` 接口参数。
+- 本端点复用正常检索的配置选择，不额外暴露 `rerank_model` 接口参数：单 KB 使用该 KB 配置，多 KB 使用共享多 KB 配置。
 - 若 rerank 调用失败而现有降级行为返回后端候选，响应仍可使用，同时诊断日志必须记录发生了降级。
 
 ## Agent Handles
@@ -129,7 +129,7 @@ Libing 多 KB 检索还要记录查询的 analyzer 分组数量。本次不要�
 聚焦测试必须验证：
 
 1. 旧请求默认使用 Libing 且不 rerank，并在响应中返回 `request_id`。
-2. Libing 单 KB 沿用原路径，多 KB 使用 grouped global retrieval。
+2. Libing 单 KB 沿用原有选取行为，多 KB 使用 grouped global retrieval 并按文本去重。
 3. Libing 不同分组返回的重复切片在最终选取前去重。
 4. 选择 IPD 时不调用 Elasticsearch，仅传递有映射的 ID，跳过并记录未映射 KB；全无映射时返回空结果。
 5. 未启用 rerank 时，候选规模使用边界处理后的 `final_top_k`。
