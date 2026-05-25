@@ -1,148 +1,173 @@
+import tempfile
 import unittest
+from pathlib import Path
+from unittest.mock import patch
 
 from tests.pydantic_stub import install_pydantic_stub
 
 install_pydantic_stub()
 
+from rag_service.document_loaders.image_markdown import ImageMarkdown
+from rag_service.document_loaders.parsed_blocks import BLOCK_TYPE_TABLE, SPLIT_POLICY_NO_SPLIT
+from rag_service.document_loaders.structured_artifacts import STRUCTURED_HTML_ARTIFACTS_KEY
+from rag_service.document_loaders import structured_html_loader as sh
 
-class StructuredHtmlLoaderTests(unittest.TestCase):
-    def test_parse_html_outputs_text_and_table_blocks_without_duplicate_table_text(self):
-        from rag_service.document_loaders.parsed_blocks import (
-            BLOCK_TYPE_TABLE,
-            BLOCK_TYPE_TEXT,
-            SPLIT_POLICY_MARKDOWN_HEADINGS,
-            SPLIT_POLICY_NO_SPLIT,
+
+class StructuredHtmlLoaderBranchTests(unittest.TestCase):
+    def test_parse_html_dispatches_heading_table_text_and_empty_flush_paths(self):
+        loader = sh.StructuredHtmlLoader("", source="source.html")
+        parsed = loader.parse_html(
+            """
+            <html><body>
+              <h1>Report</h1>
+              <p>Intro.</p>
+              <table>
+                <caption>Sales</caption>
+                <tr><th>Region</th><th>Value</th></tr>
+                <tr><td>East</td><td>1</td></tr>
+              </table>
+              <p>After table.</p>
+            </body></html>
+            """
         )
-        from rag_service.document_loaders.structured_artifacts import STRUCTURED_HTML_ARTIFACTS_KEY
-        from rag_service.document_loaders.structured_html_loader import StructuredHtmlLoader
 
-        html = """
-        <html><body>
-          <h1>Report</h1>
-          <p>Intro before table.</p>
-          <table>
-            <caption>Sales</caption>
-            <tr><th>Region</th><th>Q1</th><th>Q2</th></tr>
-            <tr><td>East</td><td>100</td><td></td></tr>
-          </table>
-          <p>After table.</p>
-        </body></html>
-        """
+        self.assertEqual(len(parsed.blocks), 3)
+        self.assertEqual(parsed.blocks[0].text, "# Report\n\nIntro.")
+        self.assertEqual(parsed.blocks[1].block_type, BLOCK_TYPE_TABLE)
+        self.assertEqual(parsed.blocks[1].split_policy, SPLIT_POLICY_NO_SPLIT)
+        self.assertEqual(parsed.blocks[2].text, "After table.")
+        self.assertIn("1. Region=East; Value=1", parsed.blocks[1].text)
+        artifacts = parsed.metadata[STRUCTURED_HTML_ARTIFACTS_KEY]
+        self.assertEqual(artifacts["tables"][0]["llm_markdown"], parsed.blocks[1].text)
 
-        parsed_document = StructuredHtmlLoader("demo.html").parse_html(html)
+        empty_state = sh._ParseState("source.html")
+        loader._append_text_block(empty_state)
+        self.assertEqual(empty_state.blocks, [])
+        no_header_state = sh._ParseState("source.html")
+        no_header_state.text_parts = ["", "Loose text"]
+        loader._append_text_block(no_header_state)
+        self.assertEqual(no_header_state.blocks[0].metadata["title"], "")
 
-        self.assertEqual(len(parsed_document.blocks), 3)
-        text_block, table_block, tail_block = parsed_document.blocks
-        self.assertEqual(text_block.block_type, BLOCK_TYPE_TEXT)
-        self.assertEqual(text_block.split_policy, SPLIT_POLICY_MARKDOWN_HEADINGS)
-        self.assertIn("# Report", text_block.text)
-        self.assertIn("Intro before table.", text_block.text)
-        self.assertNotIn("East", text_block.text)
-        self.assertEqual(table_block.block_type, BLOCK_TYPE_TABLE)
-        self.assertEqual(table_block.split_policy, SPLIT_POLICY_NO_SPLIT)
-        self.assertIn("section: Report", table_block.text)
-        self.assertIn("1. Region=East; Q1=100", table_block.text)
-        self.assertEqual(tail_block.text, "After table.")
+    def test_content_events_skip_non_content_and_recurse_into_nested_nodes(self):
+        no_body_root = sh._content_root(sh.parse_html("<div>Fallback root</div>"))
+        self.assertEqual(list(sh._content_events(no_body_root)), [("text", "Fallback root")])
 
-        artifacts = parsed_document.metadata[STRUCTURED_HTML_ARTIFACTS_KEY]
-        self.assertEqual(artifacts["tables"][0]["llm_markdown"], table_block.text)
-        self.assertIn("<table>", artifacts["tables"][0]["html"])
+        root = sh._content_root(
+            sh.parse_html(
+                """
+                <html><body>
+                  Loose text
+                  <script>ignore script</script>
+                  <style>ignore style</style>
+                  <caption>ignore caption</caption>
+                  <table><tr><td>A</td></tr></table>
+                  <img src="//cdn.example/a.png">
+                  <h2>Nested</h2>
+                  <p>Paragraph <span>inside</span><img src=""></p>
+                  <li>Item</li>
+                  <div><span>Deep</span></div>
+                </body></html>
+                """
+            )
+        )
+        events = list(sh._content_events(root))
 
-    def test_parse_html_splits_text_blocks_on_headings_with_correct_headers(self):
-        from rag_service.document_loaders.structured_html_loader import StructuredHtmlLoader
+        self.assertIn(("text", "Loose text"), events)
+        self.assertIn(("text", "![](//cdn.example/a.png)"), events)
+        self.assertIn(("heading", (2, "Nested")), events)
+        self.assertIn(("text", "Paragraph inside"), events)
+        self.assertIn(("text", "Item"), events)
+        self.assertIn(("text", "Deep"), events)
+        self.assertTrue(any(event_type == "table" for event_type, _ in events))
+        self.assertFalse(any("ignore" in str(payload) for _, payload in events))
+        self.assertEqual(sh._replace_header(["Report"], 3, "Detail"), ["Report", "", "Detail"])
 
-        html = """
-        <html><body>
-          <h1>Report</h1>
-          <p>Overview.</p>
-          <h2>Risk</h2>
-          <p>Risk detail.</p>
-        </body></html>
-        """
+    def test_image_sources_handle_missing_remote_data_and_upload_results(self):
+        self.assertEqual(sh._image_markdown(sh.HtmlNode(tag="img", attrs={}), None, []), "")
+        self.assertEqual(
+            sh._image_markdown(sh.HtmlNode(tag="img", attrs={"src": "https://example.test/a.png"}), None, []),
+            "![](https://example.test/a.png)",
+        )
+        self.assertEqual(sh._data_image_markdown("not-a-data-image", []), "")
+        self.assertEqual(sh._data_image_markdown("data:image/png;base64,not-valid", []), "")
 
-        parsed_document = StructuredHtmlLoader("demo.html").parse_html(html)
-
-        self.assertEqual([block.text for block in parsed_document.blocks], ["# Report\n\nOverview.", "## Risk\n\nRisk detail."])
-        self.assertEqual(parsed_document.blocks[0].metadata["headers"], ["Report"])
-        self.assertEqual(parsed_document.blocks[1].metadata["headers"], ["Report", "Risk"])
-
-    def test_parse_html_preserves_img_tags_as_markdown_urls(self):
-        from rag_service.document_loaders.structured_artifacts import STRUCTURED_HTML_ARTIFACTS_KEY
-        from rag_service.document_loaders.structured_html_loader import StructuredHtmlLoader
-
-        html = """
-        <html><body>
-          <h1>Report</h1>
-          <p><img src="https://example.test/diagram.png"></p>
-        </body></html>
-        """
-
-        parsed_document = StructuredHtmlLoader("demo.html").parse_html(html)
-
-        self.assertEqual(len(parsed_document.blocks), 1)
-        self.assertEqual(parsed_document.blocks[0].text, "# Report\n\n![](https://example.test/diagram.png)")
-        artifacts = parsed_document.metadata[STRUCTURED_HTML_ARTIFACTS_KEY]
-        self.assertIn("![](https://example.test/diagram.png)", artifacts["document_markdown"])
-
-    def test_parse_html_uploads_base64_images_and_records_object_keys(self):
-        from unittest.mock import patch
-
-        from rag_service.document_loaders.image_markdown import ImageMarkdown
-        import rag_service.document_loaders.structured_html_loader as structured_html_loader
-        from rag_service.document_loaders.structured_artifacts import STRUCTURED_HTML_ARTIFACTS_KEY
-        from rag_service.document_loaders.structured_html_loader import StructuredHtmlLoader
-
-        html = """
-        <html><body>
-          <h1>Report</h1>
-          <p><img src="data:image/png;base64,aW1hZ2UtYnl0ZXM="></p>
-        </body></html>
-        """
-
+        object_keys = []
         with patch.object(
-            structured_html_loader,
+            sh,
             "_upload_html_image_bytes",
-            lambda content, extension, object_key_prefix="": ImageMarkdown(
-                markdown="![](https://example.test/image.png)",
-                object_key="image-key-1",
-            ),
-            create=True,
-        ):
-            parsed_document = StructuredHtmlLoader("demo.html").parse_html(html)
+            return_value=ImageMarkdown(markdown="![](uploaded.jpg)", object_key="images/uploaded.jpg"),
+        ) as upload:
+            markdown = sh._image_markdown(
+                sh.HtmlNode(tag="img", attrs={"src": "data:image/jpeg;base64,aW1n"}),
+                None,
+                object_keys,
+                "images/",
+            )
 
-        self.assertEqual(parsed_document.blocks[0].text, "# Report\n\n![](https://example.test/image.png)")
-        artifacts = parsed_document.metadata[STRUCTURED_HTML_ARTIFACTS_KEY]
-        self.assertEqual(artifacts["image_object_keys"], ["image-key-1"])
+        self.assertEqual(markdown, "![](uploaded.jpg)")
+        self.assertEqual(object_keys, ["images/uploaded.jpg"])
+        upload.assert_called_once_with(b"img", "jpg", "images/")
+        self.assertEqual(
+            sh._uploaded_image_markdown(ImageMarkdown(markdown="![](plain)", object_key=""), object_keys),
+            "![](plain)",
+        )
+        self.assertEqual(object_keys, ["images/uploaded.jpg"])
 
-    def test_parse_html_uploads_images_under_configured_prefix(self):
-        from unittest.mock import patch
+    def test_local_images_reject_unsafe_paths_and_upload_existing_files(self):
+        with tempfile.TemporaryDirectory(dir=".") as temp_dir:
+            base_dir = Path(temp_dir)
+            (base_dir / "image").write_bytes(b"no-extension")
+            (base_dir / "photo.png").write_bytes(b"png-bytes")
 
-        from rag_service.document_loaders.image_markdown import ImageMarkdown
-        import rag_service.document_loaders.structured_html_loader as structured_html_loader
-        from rag_service.document_loaders.structured_artifacts import STRUCTURED_HTML_ARTIFACTS_KEY
-        from rag_service.document_loaders.structured_html_loader import StructuredHtmlLoader
+            self.assertEqual(sh._local_image_markdown("photo.png", None, []), "")
+            self.assertIsNone(sh._safe_local_image_path("https://example.test/photo.png", base_dir))
+            self.assertIsNone(sh._safe_local_image_path("", base_dir))
+            self.assertIsNone(sh._safe_local_image_path("../outside.png", base_dir))
+            self.assertEqual(sh._local_image_markdown("missing.png", base_dir, []), "")
 
-        calls = []
-        html = """
-        <html><body>
-          <h1>Report</h1>
-          <p><img src="data:image/png;base64,aW1hZ2UtYnl0ZXM="></p>
-        </body></html>
-        """
+            calls = []
 
-        def fake_upload(content, extension, object_key_prefix=""):
-            calls.append((content, extension, object_key_prefix))
-            return ImageMarkdown(markdown="![](image)", object_key=object_key_prefix + "image.png")
+            def fake_upload(content, extension, object_key_prefix=""):
+                calls.append((content, extension, object_key_prefix))
+                return ImageMarkdown(markdown=f"![]({extension})", object_key=f"{object_key_prefix}{extension}")
 
-        with patch.object(structured_html_loader, "upload_image_bytes", fake_upload):
-            parsed_document = StructuredHtmlLoader(
-                "demo.html",
-                image_upload_prefix="asset/doc/artifacts/structured_html/images/",
-            ).parse_html(html)
+            keys = []
+            with patch.object(sh, "_upload_html_image_bytes", side_effect=fake_upload):
+                self.assertEqual(sh._local_image_markdown("image", base_dir, keys, "local/"), "![](png)")
+                self.assertEqual(
+                    sh._image_markdown(sh.HtmlNode(tag="img", attrs={"src": "photo.png?version=1"}), base_dir, keys, "local/"),
+                    "![](png)",
+                )
 
-        self.assertEqual(calls, [(b"image-bytes", "png", "asset/doc/artifacts/structured_html/images/")])
-        artifacts = parsed_document.metadata[STRUCTURED_HTML_ARTIFACTS_KEY]
-        self.assertEqual(artifacts["image_object_keys"], ["asset/doc/artifacts/structured_html/images/image.png"])
+        self.assertEqual(calls, [(b"no-extension", "png", "local/"), (b"png-bytes", "png", "local/")])
+        self.assertEqual(keys, ["local/png", "local/png"])
+
+    def test_markdown_part_joining_places_images_on_separate_lines(self):
+        self.assertEqual(sh._node_markdown_text(sh.HtmlNode(tag="p", children=[]), None, []), "")
+        paragraph = sh.HtmlNode(
+            tag="p",
+            children=[
+                "A",
+                sh.HtmlNode(tag="script", children=["skip"]),
+                sh.HtmlNode(tag="img", attrs={"src": "https://example.test/x.png"}),
+                sh.HtmlNode(tag="span", children=["B"]),
+            ],
+        )
+        self.assertEqual(sh._node_markdown_text(paragraph, None, []), "A\n![](https://example.test/x.png) B")
+        self.assertEqual(sh._join_markdown_parts([]), "")
+        self.assertEqual(sh._join_markdown_parts(["A", "", "![](x)", "B"]), "A\n![](x) B")
+        self.assertEqual(sh._join_markdown_parts(["![](x)", "![](y)"]), "![](x)\n![](y)")
+
+    def test_file_entrypoints_and_image_upload_wrapper_delegate_to_helpers(self):
+        with tempfile.TemporaryDirectory(dir=".") as temp_dir:
+            html_path = Path(temp_dir) / "input.html"
+            html_path.write_text("<body><p>From file</p></body>", encoding="utf-8")
+            self.assertEqual(sh.StructuredHtmlLoader(str(html_path)).parse_blocks()[0].text, "From file")
+
+        with patch.object(sh, "upload_image_bytes", return_value=ImageMarkdown(markdown="![](x)", object_key="key")) as upload:
+            result = sh._upload_html_image_bytes(b"bytes", "png", "prefix/")
+        self.assertEqual(result.object_key, "key")
+        upload.assert_called_once_with(b"bytes", "png", object_key_prefix="prefix/")
 
 
 if __name__ == "__main__":

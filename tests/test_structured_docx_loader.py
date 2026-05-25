@@ -1,20 +1,23 @@
+import sys
 import unittest
+from types import ModuleType, SimpleNamespace
+from unittest.mock import patch
 
 from tests.pydantic_stub import install_pydantic_stub
 
 install_pydantic_stub()
 
-
-class FakeStyle:
-    def __init__(self, name):
-        self.name = name
+from rag_service.document_loaders.image_markdown import ImageMarkdown
+from rag_service.document_loaders.parsed_blocks import BLOCK_TYPE_TABLE, SPLIT_POLICY_NO_SPLIT
+from rag_service.document_loaders.structured_artifacts import STRUCTURED_DOCX_ARTIFACTS_KEY
+from rag_service.document_loaders import structured_docx_loader as sd
 
 
 class FakeParagraph:
-    def __init__(self, text, style_name="Normal", xml=""):
+    def __init__(self, text="", style_name="Normal", xml=""):
         self.text = text
-        self.style = FakeStyle(style_name)
-        self._p = type("FakeXml", (), {"xml": xml})()
+        self.style = SimpleNamespace(name=style_name)
+        self._p = SimpleNamespace(xml=xml)
 
 
 class FakeCell:
@@ -23,8 +26,8 @@ class FakeCell:
 
 
 class FakeRow:
-    def __init__(self, cells):
-        self.cells = cells
+    def __init__(self, *values):
+        self.cells = [FakeCell(value) for value in values]
 
 
 class FakeTable:
@@ -33,142 +36,151 @@ class FakeTable:
 
 
 class FakeDocument:
-    def __init__(self, blocks, related_parts=None):
-        self.blocks = blocks
-        self.part = type("FakePart", (), {"related_parts": related_parts or {}})()
+    def __init__(self, blocks=None, related_parts=None):
+        self.blocks = list(blocks or [])
+        self.part = SimpleNamespace(related_parts=related_parts or {})
 
 
 class FakeImagePart:
-    def __init__(self, partname="/word/media/image1.png", blob=b"image-bytes"):
+    def __init__(self, partname="/word/media/image.png", content_type="image/png", blob=b"image-bytes"):
         self.partname = partname
+        self.content_type = content_type
         self.blob = blob
-        self.content_type = "image/png"
 
 
-class StructuredDocxLoaderTests(unittest.TestCase):
-    def test_parse_document_returns_markdown_text_block(self):
-        from rag_service.document_loaders.parsed_blocks import SPLIT_POLICY_MARKDOWN_HEADINGS
-        from rag_service.document_loaders.structured_docx_loader import StructuredDocxLoader
+class StructuredDocxLoaderBranchTests(unittest.TestCase):
+    def test_parse_document_handles_empty_headings_text_and_tables(self):
+        loader = sd.StructuredDocxLoader("demo.docx", source="source.docx")
 
+        empty = loader.parse_document(FakeDocument())
+        self.assertEqual(empty.blocks, [])
+        self.assertEqual(empty.metadata["loader"], "structured_docx")
+        self.assertNotIn(STRUCTURED_DOCX_ARTIFACTS_KEY, empty.metadata)
+        with patch.object(loader, "_open_document", return_value=FakeDocument([FakeParagraph("opened")])):
+            self.assertEqual(loader.parse_blocks()[0].text, "opened")
+
+        table = FakeTable([FakeRow("Name", "Value"), FakeRow("A", "1")])
+        parsed = loader.parse_document(
+            FakeDocument(
+                [
+                    FakeParagraph(""),
+                    FakeParagraph("Preamble"),
+                    FakeParagraph("Report", "Heading 1"),
+                    FakeParagraph("Body"),
+                    table,
+                    FakeParagraph("After table"),
+                ]
+            )
+        )
+
+        self.assertEqual([block.text for block in parsed.blocks[:2]], ["Preamble", "# Report\n\nBody"])
+        self.assertEqual(parsed.blocks[2].block_type, BLOCK_TYPE_TABLE)
+        self.assertEqual(parsed.blocks[2].split_policy, SPLIT_POLICY_NO_SPLIT)
+        self.assertEqual(parsed.blocks[2].metadata["table_id"], "table_001")
+        self.assertEqual(parsed.blocks[3].text, "After table")
+        artifacts = parsed.metadata[STRUCTURED_DOCX_ARTIFACTS_KEY]
+        self.assertEqual(len(artifacts["tables"]), 1)
+        self.assertIn("# Report", artifacts["document_markdown"])
+
+    def test_paragraph_paths_skip_empty_content_and_append_heading_images(self):
+        loader = sd.StructuredDocxLoader("demo.docx")
+        elements = []
+
+        self.assertEqual(loader._append_paragraph_element(elements, FakeParagraph(), [], 0, FakeDocument()), [])
+        self.assertEqual(elements, [])
+        self.assertEqual(loader._append_paragraph_element(elements, FakeParagraph("body"), [], 1, FakeDocument()), [])
+        self.assertEqual(elements[0].text, "body")
+
+        heading_elements = []
+        with patch.object(loader, "_paragraph_image_markdown", return_value=["![](diagram.png)"]):
+            headers = loader._append_paragraph_element(
+                heading_elements,
+                FakeParagraph("Risk", "Heading 2"),
+                ["Report"],
+                2,
+                FakeDocument(),
+            )
+
+        self.assertEqual(headers, ["Report", "Risk"])
+        self.assertEqual([element.text for element in heading_elements], ["## Risk", "![](diagram.png)"])
+        blocks = []
+        loader._append_text_block(blocks, [])
+        self.assertEqual(blocks, [])
+
+    def test_image_relation_paths_skip_non_images_and_record_uploaded_images(self):
+        xml = (
+            '<w:p><pic:pic><a:blip r:embed="missing"/><a:blip r:embed="text"/>'
+            '<a:blip r:embed="blank"/><a:blip r:embed="good"/><a:blip r:embed="good"/></pic:pic></w:p>'
+        )
+        blank_part = FakeImagePart("/word/media/blank.png")
+        good_part = FakeImagePart("/word/media/good.png")
         document = FakeDocument(
-            [
-                FakeParagraph("Asset List", "Heading 1"),
-                FakeParagraph("First paragraph"),
-                FakeParagraph("Second paragraph"),
-                FakeParagraph("Risk List", "Heading 1"),
-                FakeParagraph("Risk paragraph"),
-            ]
+            related_parts={
+                "text": FakeImagePart("/word/media/file.txt", "text/plain"),
+                "blank": blank_part,
+                "good": good_part,
+            }
         )
+        loader = sd.StructuredDocxLoader("demo.docx", image_upload_prefix="images/")
+        uploads = []
 
-        parsed_document = StructuredDocxLoader("demo.docx").parse_document(document)
+        def fake_upload(part, object_key_prefix=""):
+            uploads.append((part.partname, object_key_prefix))
+            if part is blank_part:
+                return ImageMarkdown(markdown="", object_key="")
+            return ImageMarkdown(markdown="![](good.png)", object_key="images/good.png")
 
-        self.assertEqual(parsed_document.text, "")
-        self.assertEqual(len(parsed_document.blocks), 2)
-        self.assertEqual(
-            [block.text for block in parsed_document.blocks],
-            ["# Asset List\n\nFirst paragraph\n\nSecond paragraph", "# Risk List\n\nRisk paragraph"],
-        )
-        self.assertEqual(parsed_document.blocks[0].split_policy, SPLIT_POLICY_MARKDOWN_HEADINGS)
-        self.assertEqual(parsed_document.blocks[0].metadata["headers"], ["Asset List"])
-        self.assertEqual(parsed_document.blocks[1].metadata["headers"], ["Risk List"])
+        self.assertEqual(loader._paragraph_image_markdown(FakeParagraph(xml="<w:p/>"), document), [])
+        with patch.object(sd, "_upload_image_part", side_effect=fake_upload):
+            links = loader._paragraph_image_markdown(FakeParagraph(xml=xml), document)
 
-    def test_parse_document_keeps_table_artifacts_out_of_block_metadata(self):
-        from rag_service.document_loaders.parsed_blocks import BLOCK_TYPE_TABLE, SPLIT_POLICY_NO_SPLIT
-        from rag_service.document_loaders.structured_artifacts import STRUCTURED_DOCX_ARTIFACTS_KEY
-        from rag_service.document_loaders.structured_docx_loader import StructuredDocxLoader
+        self.assertEqual(links, ["![](good.png)"])
+        self.assertEqual(loader.image_object_keys, ["images/good.png"])
+        self.assertEqual(uploads, [("/word/media/blank.png", "images/"), ("/word/media/good.png", "images/")])
 
-        table = FakeTable(
-            [
-                FakeRow([FakeCell("Name"), FakeCell("Value")]),
-                FakeRow([FakeCell("A"), FakeCell("1")]),
-            ]
-        )
-        document = FakeDocument([FakeParagraph("Asset List", "Heading 1"), FakeParagraph("Intro"), table])
+    def test_heading_relationship_and_image_helpers_cover_fallbacks(self):
+        loader = sd.StructuredDocxLoader("demo.docx")
+        xml = '<pic:pic><a:blip r:embed="rId1"/><a:blip r:id="rId1"/></pic:pic>'
 
-        parsed_document = StructuredDocxLoader("demo.docx").parse_document(document)
+        self.assertEqual(loader._heading_level(FakeParagraph("Title", "Title")), 1)
+        self.assertEqual(loader._heading_level(FakeParagraph("Third", "Heading 3")), 3)
+        self.assertIsNone(loader._heading_level(FakeParagraph("Body", "Normal")))
+        self.assertIsNone(loader._parse_heading_level("Heading Bad"))
+        self.assertEqual(loader._replace_header(["Report"], 3, "Detail"), ["Report", "", "Detail"])
+        self.assertTrue(sd._contains_image_marker(xml))
+        self.assertFalse(sd._contains_image_marker("<w:p/>"))
+        self.assertEqual(sd._image_relation_ids(xml), ["rId1"])
 
-        self.assertEqual(len(parsed_document.blocks), 2)
-        text_block, table_block = parsed_document.blocks
-        self.assertIn("# Asset List", text_block.text)
-        self.assertIn("Intro", text_block.text)
-        self.assertEqual(table_block.block_type, BLOCK_TYPE_TABLE)
-        self.assertEqual(table_block.split_policy, SPLIT_POLICY_NO_SPLIT)
-        self.assertIn("fields:\n- Name\n- Value", table_block.text)
-        self.assertIn("1. Name=A; Value=1", table_block.text)
-        self.assertNotIn("|", table_block.text)
-        self.assertEqual(table_block.metadata["table_id"], "table_001")
-        self.assertEqual(table_block.metadata["table"]["flatten_headers"], ["Name", "Value"])
-        self.assertNotIn("display", table_block.metadata)
-        self.assertNotIn("expanded_rows", table_block.metadata["table"])
-        self.assertNotIn("cell_spans", table_block.metadata["table"])
+        self.assertEqual(sd._related_parts(FakeDocument(related_parts={"doc": 1}), FakeParagraph()), {"doc": 1})
+        owned = FakeParagraph()
+        owned.part = SimpleNamespace(related_parts={"block": 2})
+        self.assertEqual(sd._related_parts(object(), owned), {"block": 2})
+        self.assertEqual(sd._related_parts(object(), object()), {})
+        fake_section_loader = ModuleType("rag_service.document_loaders.docx_section_loader")
+        fake_section_loader.iter_block_items = lambda document: ["fallback"]
+        with patch.dict(sys.modules, {"rag_service.document_loaders.docx_section_loader": fake_section_loader}):
+            self.assertEqual(loader._iter_blocks(object()), ["fallback"])
 
-        artifacts = parsed_document.metadata[STRUCTURED_DOCX_ARTIFACTS_KEY]
-        self.assertIn("# Asset List", artifacts["document_markdown"])
-        self.assertEqual(table_block.text, artifacts["tables"][0]["llm_markdown"])
-        self.assertIn("<table>", artifacts["tables"][0]["html"])
+        self.assertFalse(sd._is_image_part(None))
+        self.assertTrue(sd._is_image_part(FakeImagePart()))
+        self.assertTrue(sd._is_image_part(FakeImagePart("/word/media/vector.svg", "application/octet-stream")))
+        self.assertFalse(sd._is_image_part(FakeImagePart("/word/media/file.txt", "text/plain")))
+        self.assertEqual(sd._combine_text_and_images("Text", ["![](x)"]), "Text\n![](x)")
+        self.assertEqual(sd._combine_text_and_images("", []), "")
 
-    def test_parse_document_preserves_image_paragraph_as_markdown_url(self):
-        from unittest.mock import patch
+    def test_upload_image_part_forwards_prefix_and_extension(self):
+        with patch.object(sd, "upload_image_bytes", return_value=ImageMarkdown(markdown="![](x)", object_key="prefix/x.png")) as upload:
+            result = sd._upload_image_part(FakeImagePart(), "prefix/")
 
-        from rag_service.document_loaders.image_markdown import ImageMarkdown
-        import rag_service.document_loaders.structured_docx_loader as structured_docx_loader
-        from rag_service.document_loaders.structured_artifacts import STRUCTURED_DOCX_ARTIFACTS_KEY
-        from rag_service.document_loaders.structured_docx_loader import StructuredDocxLoader
+        self.assertEqual(result.object_key, "prefix/x.png")
+        upload.assert_called_once_with(b"image-bytes", "png", object_key_prefix="prefix/")
 
-        image_xml = '<w:p><pic:pic><a:blip r:embed="rId9"/></pic:pic></w:p>'
-        image_part = FakeImagePart()
-        document = FakeDocument(
-            [
-                FakeParagraph("Asset List", "Heading 1"),
-                FakeParagraph("", xml=image_xml),
-            ],
-            related_parts={"rId9": image_part},
-        )
-        with patch.object(
-            structured_docx_loader,
-            "_upload_image_part",
-            lambda part, object_key_prefix="": ImageMarkdown(
-                markdown="![](https://example.test/image1.png)",
-                object_key="image-key-1",
-            ),
-            create=True,
-        ):
-            parsed_document = StructuredDocxLoader("demo.docx").parse_document(document)
-
-        self.assertEqual(len(parsed_document.blocks), 1)
-        self.assertEqual(parsed_document.blocks[0].text, "# Asset List\n\n![](https://example.test/image1.png)")
-        artifacts = parsed_document.metadata[STRUCTURED_DOCX_ARTIFACTS_KEY]
-        self.assertIn("![](https://example.test/image1.png)", artifacts["document_markdown"])
-        self.assertEqual(artifacts["image_object_keys"], ["image-key-1"])
-
-    def test_parse_document_uploads_images_under_configured_prefix(self):
-        from unittest.mock import patch
-
-        from rag_service.document_loaders.image_markdown import ImageMarkdown
-        import rag_service.document_loaders.structured_docx_loader as structured_docx_loader
-        from rag_service.document_loaders.structured_artifacts import STRUCTURED_DOCX_ARTIFACTS_KEY
-        from rag_service.document_loaders.structured_docx_loader import StructuredDocxLoader
-
-        calls = []
-        image_xml = '<w:p><pic:pic><a:blip r:embed="rId9"/></pic:pic></w:p>'
-        document = FakeDocument(
-            [FakeParagraph("Report", "Heading 1"), FakeParagraph("", xml=image_xml)],
-            related_parts={"rId9": FakeImagePart()},
-        )
-
-        def fake_upload(content, extension, object_key_prefix=""):
-            calls.append((content, extension, object_key_prefix))
-            return ImageMarkdown(markdown="![](image)", object_key=object_key_prefix + "image.png")
-
-        with patch.object(structured_docx_loader, "upload_image_bytes", fake_upload):
-            parsed_document = StructuredDocxLoader(
-                "demo.docx",
-                image_upload_prefix="asset/doc/artifacts/structured_docx/images/",
-            ).parse_document(document)
-
-        self.assertEqual(calls, [(b"image-bytes", "png", "asset/doc/artifacts/structured_docx/images/")])
-        artifacts = parsed_document.metadata[STRUCTURED_DOCX_ARTIFACTS_KEY]
-        self.assertEqual(artifacts["image_object_keys"], ["asset/doc/artifacts/structured_docx/images/image.png"])
+        opened = []
+        fake_docx = ModuleType("docx")
+        fake_docx.Document = lambda path: opened.append(path) or "opened document"
+        with patch.dict(sys.modules, {"docx": fake_docx}):
+            self.assertEqual(sd.StructuredDocxLoader("input.docx")._open_document(), "opened document")
+        self.assertEqual(opened, ["input.docx"])
 
 
 if __name__ == "__main__":
