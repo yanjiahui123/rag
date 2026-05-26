@@ -35,6 +35,34 @@ def knowledge_base_service_modules(fake_service):
     }
 
 
+class MergeSession:
+    def __init__(self):
+        self.row = None
+        self.committed = False
+
+    def merge(self, row):
+        self.row = row
+
+    def commit(self):
+        self.committed = True
+
+
+class AddSession:
+    def __init__(self):
+        self.row = None
+        self.committed = False
+
+    def add(self, row):
+        self.row = row
+
+    def commit(self):
+        self.committed = True
+
+
+def fake_request_response_log(**values):
+    return SimpleNamespace(**values)
+
+
 class AgentServiceCoverageTests(unittest.TestCase):
     def test_search_slices_records_success_failure_and_log_writer_failure(self):
         records = []
@@ -96,7 +124,7 @@ class AgentServiceCoverageTests(unittest.TestCase):
 
         self.assertEqual(response.slices[0].text, "default")
 
-    def test_default_libing_paths_cover_empty_single_and_grouped_results(self):
+    def test_default_retrieval_requires_session_and_handles_no_authorized_kbs(self):
         with self.assertRaisesRegex(RuntimeError, "database session"):
             svc._default_retrieve_documents(SearchSlicesRequest(query="q"), "uid")
 
@@ -110,6 +138,7 @@ class AgentServiceCoverageTests(unittest.TestCase):
         self.assertEqual(empty.documents, [])
         self.assertEqual(empty.diagnostics["candidate_count_after_dedup"], 0)
 
+    def test_default_libing_single_kb_returns_highest_score(self):
         kb = SimpleNamespace(sn="kb-one", analyzer="ik")
         single_calls = []
         single_service = SimpleNamespace(
@@ -134,6 +163,7 @@ class AgentServiceCoverageTests(unittest.TestCase):
         self.assertEqual([document.text for document in documents], ["high"])
         self.assertEqual(single_calls[0][1]["analyzer"], "ik")
 
+    def test_default_libing_grouped_kbs_deduplicate_candidates(self):
         kb_a = SimpleNamespace(sn="kb-a", analyzer="ik")
         kb_b = SimpleNamespace(sn="kb-b", analyzer="standard")
         grouped_service = SimpleNamespace(
@@ -166,7 +196,7 @@ class AgentServiceCoverageTests(unittest.TestCase):
         self.assertEqual(grouped.diagnostics["candidate_count_before_dedup"], 3)
         self.assertEqual(grouped.diagnostics["candidate_count_after_dedup"], 2)
 
-    def test_ipd_and_rerank_paths_cover_mapping_filter_and_degradation(self):
+    def test_ipd_rerank_filters_mappings_and_updates_score(self):
         mapped = SimpleNamespace(sn="mapped", ipd_rag_kb_id="ipd-1")
         missing = SimpleNamespace(sn="missing", ipd_rag_kb_id=None)
         query_top_k = []
@@ -204,6 +234,8 @@ class AgentServiceCoverageTests(unittest.TestCase):
         self.assertEqual(reranked.diagnostics["ipd_skipped_unmapped_kb_sn_list"], ["missing"])
         self.assertFalse(reranked.diagnostics["rerank_degraded"])
 
+    def test_ipd_without_mapping_returns_no_documents(self):
+        missing = SimpleNamespace(sn="missing", ipd_rag_kb_id=None)
         no_mapping_service = SimpleNamespace(
             permission_judge=lambda session, kb_sns, uid: [missing],
             get_retrieve_param_by_kb_config_and_request=lambda knowledge_base, query: SimpleNamespace(
@@ -221,6 +253,7 @@ class AgentServiceCoverageTests(unittest.TestCase):
             )
         self.assertEqual(no_mapping.documents, [])
 
+    def test_rerank_failure_returns_raw_ranked_document(self):
         degrading_service = SimpleNamespace(
             get_rerank_format=lambda document: document.text,
             rerank_embedding=lambda pairs, model: (_ for _ in ()).throw(RuntimeError("rerank failed")),
@@ -236,7 +269,7 @@ class AgentServiceCoverageTests(unittest.TestCase):
         self.assertTrue(degraded)
         self.assertEqual([document.text for document in fallback], ["raw-high"])
 
-    def test_log_helpers_write_merge_and_add_sessions(self):
+    def test_search_log_record_and_dump_helpers(self):
         start = svc._utcnow()
         request = SearchSlicesRequest(query="q", kb_sn="kb")
         record = svc._search_log_record(
@@ -252,31 +285,14 @@ class AgentServiceCoverageTests(unittest.TestCase):
         )
         self.assertEqual(record["error_reason"], "failure")
         svc._default_search_log_writer(record, None)
+        self.assertEqual(svc._dump_model(SimpleNamespace(model_dump=lambda: {"new": True})), {"new": True})
+        self.assertEqual(svc._dump_model(SimpleNamespace(dict=lambda: {"old": True})), {"old": True})
+        self.assertIs(start.tzinfo, timezone.utc)
 
-        class MergeSession:
-            def __init__(self):
-                self.row = None
-                self.committed = False
-
-            def merge(self, row):
-                self.row = row
-
-            def commit(self):
-                self.committed = True
-
-        class AddSession:
-            def __init__(self):
-                self.row = None
-                self.committed = False
-
-            def add(self, row):
-                self.row = row
-
-            def commit(self):
-                self.committed = True
-
+    def test_default_search_log_writer_supports_merge_and_add_sessions(self):
+        record = {"error_reason": "failure"}
         fake_models = ModuleType("rag_service.models.database.models")
-        fake_models.RequestResponseLog = lambda **values: SimpleNamespace(**values)
+        fake_models.RequestResponseLog = fake_request_response_log
         merge_session = MergeSession()
         add_session = AddSession()
         with patch.dict(sys.modules, {"rag_service.models.database.models": fake_models}):
@@ -286,10 +302,6 @@ class AgentServiceCoverageTests(unittest.TestCase):
         self.assertTrue(add_session.committed)
         self.assertIsNone(merge_session.row.question_id)
         self.assertEqual(add_session.row.error_reason, "failure")
-
-        self.assertEqual(svc._dump_model(SimpleNamespace(model_dump=lambda: {"new": True})), {"new": True})
-        self.assertEqual(svc._dump_model(SimpleNamespace(dict=lambda: {"old": True})), {"old": True})
-        self.assertIs(start.tzinfo, timezone.utc)
 
     def test_obs_payload_parsers_cover_valid_scopes_and_invalid_shapes(self):
         self.assertIsNone(svc._structured_artifact_key_parts("doc/not_structured/manifest.json"))
