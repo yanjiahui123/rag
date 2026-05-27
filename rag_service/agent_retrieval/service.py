@@ -440,18 +440,40 @@ def _agent_libing_documents(
     diagnostics: Dict[str, Any],
 ) -> List[Any]:
     manager = knowledge_base_service.get_vector_store_manager()
+    diagnostics["libing_manager_top_k"] = retrieve_config.top_k
     if len(knowledge_bases) == 1:
         diagnostics["libing_analyzer_group_count"] = 1
         stores = knowledge_base_service.get_embedding_model_and_vector_stores(session, knowledge_bases[0].sn)
-        return _agent_libing_group_documents(manager, query_request, retrieve_config, stores, knowledge_bases[0].analyzer)
+        _record_libing_store_diagnostics(diagnostics, stores)
+        return _agent_libing_group_documents(
+            manager, query_request, retrieve_config, stores, knowledge_bases[0].analyzer
+        )
     grouped_stores = knowledge_base_service.get_grouped_vector_stores_by_knowledge_base_and_asset(
         session, {knowledge_base.sn: [] for knowledge_base in knowledge_bases}
     )
     diagnostics["libing_analyzer_group_count"] = len(grouped_stores)
     documents = []
     for analyzer, stores in grouped_stores.items():
+        _record_libing_store_diagnostics(diagnostics, stores)
         documents.extend(_agent_libing_group_documents(manager, query_request, retrieve_config, stores, analyzer))
     return documents
+
+
+def _record_libing_store_diagnostics(diagnostics: Dict[str, Any], stores: Any) -> None:
+    if not hasattr(stores, "items"):
+        return
+    for embedding_model, search_info in stores.items():
+        model_name = str(getattr(embedding_model, "value", embedding_model))
+        diagnostics["libing_embedding_model_group_count"] += 1
+        if model_name not in diagnostics["libing_embedding_model_list"]:
+            diagnostics["libing_embedding_model_list"].append(model_name)
+        indexes = (
+            search_info.get("vs_indexes")
+            if isinstance(search_info, dict)
+            else getattr(search_info, "vs_indexes", None)
+        )
+        if indexes:
+            diagnostics["libing_vector_store_index_count"] += len(indexes)
 
 
 def _agent_libing_group_documents(
@@ -482,13 +504,13 @@ def _finalize_retrieval_outcome(
     diagnostics: Dict[str, Any],
 ) -> RetrievalOutcome:
     diagnostics["candidate_count_before_dedup"] = len(documents)
-    should_deduplicate = request.retrieval_backend == "ipd" or len(knowledge_bases) > 1
+    should_deduplicate = request.enable_rerank or request.retrieval_backend == "ipd" or len(knowledge_bases) > 1
+    diagnostics["deduplication_applied"] = should_deduplicate
     unique_documents = _deduplicate_documents(documents) if should_deduplicate else list(documents)
     diagnostics["candidate_count_after_dedup"] = len(unique_documents)
     if request.enable_rerank and unique_documents:
-        rerank_candidates = sorted(unique_documents, key=_document_score, reverse=True)[: query_request.top_k]
         results, degraded = _rerank_documents(
-            knowledge_base_service, query_request.question, rerank_candidates, _bounded_top_k(request.top_k), retrieve_config
+            knowledge_base_service, query_request.question, unique_documents, _bounded_top_k(request.top_k), retrieve_config
         )
         diagnostics["rerank_degraded"] = degraded
         return RetrievalOutcome(documents=results, diagnostics=diagnostics)
@@ -510,17 +532,23 @@ def _base_search_diagnostics(request: SearchSlicesRequest, final_top_k: int) -> 
         "enable_rerank": request.enable_rerank,
         "requested_top_k": request.top_k,
         "final_top_k": final_top_k,
-        "candidate_top_k": 100 if request.enable_rerank else final_top_k,
+        "candidate_top_k": _candidate_top_k(request),
         "kb_sn_list": _request_kb_sn_list(request),
         "rerank_requested": request.enable_rerank,
         "rerank_degraded": False,
         "ipd_mapped_kb_sn_list": [],
         "ipd_skipped_unmapped_kb_sn_list": [],
+        "libing_embedding_model_group_count": 0,
+        "libing_embedding_model_list": [],
+        "libing_vector_store_index_count": 0,
+        "libing_manager_top_k": None,
+        "query_preprocessing": "raw_request_query",
+        "rerank_control": "enable_rerank",
     }
 
 
 def _candidate_top_k(request: SearchSlicesRequest) -> int:
-    return 100 if request.enable_rerank else _bounded_top_k(request.top_k)
+    return _bounded_top_k(request.top_k)
 
 
 def _deduplicate_documents(documents: Iterable[Any]) -> List[Any]:
