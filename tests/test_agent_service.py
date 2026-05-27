@@ -227,7 +227,7 @@ class AgentServiceCoverageTests(unittest.TestCase):
                 "uid",
                 session=object(),
             )
-        self.assertEqual(query_top_k, [100])
+        self.assertEqual(query_top_k, [1])
         self.assertEqual([document.text for document in reranked.documents], ["winner"])
         self.assertEqual(reranked.documents[0].score, 0.95)
         self.assertEqual(reranked.diagnostics["ipd_mapped_kb_sn_list"], ["mapped"])

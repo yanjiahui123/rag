@@ -296,6 +296,10 @@ class AgentRetrievalTests(unittest.TestCase):
         store_requests = []
         manager_calls = []
         kb = SimpleNamespace(sn="kb-a", analyzer="ik")
+        stores = {
+            "bge": SimpleNamespace(vs_indexes=["asset-bge"]),
+            "qwen": SimpleNamespace(vs_indexes=["asset-qwen-a", "asset-qwen-b"]),
+        }
 
         def retrieve(question, top_k, stores, threshold, **kwargs):
             manager_calls.append((question, top_k, stores, threshold, kwargs))
@@ -313,7 +317,7 @@ class AgentRetrievalTests(unittest.TestCase):
                 rerank_model="rerank",
             ),
             get_embedding_model_and_vector_stores=lambda session, kb_sn: (
-                store_requests.append(kb_sn) or "single-store"
+                store_requests.append(kb_sn) or stores
             ),
             get_vector_store_manager=lambda: SimpleNamespace(retrieve=retrieve),
         )
@@ -334,9 +338,13 @@ class AgentRetrievalTests(unittest.TestCase):
             )
 
         self.assertEqual(store_requests, ["kb-a"])
-        self.assertEqual(manager_calls[0][2], "single-store")
+        self.assertIs(manager_calls[0][2], stores)
         self.assertEqual([document.score for document in outcome.documents], [0.8])
         self.assertEqual(outcome.diagnostics["libing_analyzer_group_count"], 1)
+        self.assertEqual(outcome.diagnostics["libing_embedding_model_group_count"], 2)
+        self.assertEqual(outcome.diagnostics["libing_embedding_model_list"], ["bge", "qwen"])
+        self.assertEqual(outcome.diagnostics["libing_vector_store_index_count"], 3)
+        self.assertNotIn("max_es_top_k", manager_calls[0][4])
 
     def test_ipd_backend_skips_unmapped_kbs_without_libing_fallback(self):
         from rag_service.agent_retrieval.models import SearchSlicesRequest
@@ -437,11 +445,11 @@ class AgentRetrievalTests(unittest.TestCase):
         self.assertFalse(outcome.diagnostics["rerank_degraded"])
         self.assertEqual(rerank_calls, [])
 
-    def test_rerank_fetches_fixed_hundred_candidates_and_limits_final_results(self):
+    def test_libing_rerank_passes_requested_top_k_to_manager_and_limits_final_results(self):
         from rag_service.agent_retrieval.models import SearchSlicesRequest
         from rag_service.agent_retrieval.service import AgentRetrievalService
 
-        manager_top_ks = []
+        manager_calls = []
         records = []
         kb = SimpleNamespace(sn="kb-a", analyzer="ik")
         candidates = [
@@ -451,7 +459,7 @@ class AgentRetrievalTests(unittest.TestCase):
         ]
 
         def retrieve(question, top_k, stores, threshold, **kwargs):
-            manager_top_ks.append(top_k)
+            manager_calls.append((top_k, kwargs))
             return candidates
 
         fake_service = SimpleNamespace(
@@ -486,10 +494,70 @@ class AgentRetrievalTests(unittest.TestCase):
                 request_id="rerank-request",
             )
 
-        self.assertEqual(manager_top_ks, [100])
+        self.assertEqual(manager_calls[0][0], 2)
+        self.assertNotIn("max_es_top_k", manager_calls[0][1])
+        self.assertEqual(records[0]["extra_info"]["candidate_top_k"], 2)
+        self.assertEqual(records[0]["extra_info"]["libing_manager_top_k"], 2)
         self.assertEqual([item.text for item in response.slices], ["rerank-high", "rerank-second"])
         self.assertTrue(records[0]["extra_info"]["rerank_requested"])
         self.assertFalse(records[0]["extra_info"]["rerank_degraded"])
+
+    def test_rerank_single_kb_deduplicates_cross_embedding_hits_before_rerank(self):
+        from rag_service.agent_retrieval.models import SearchSlicesRequest
+        from rag_service.agent_retrieval.service import AgentRetrievalService
+
+        records = []
+        rerank_pairs = []
+        kb = SimpleNamespace(sn="kb-a", analyzer="ik")
+        candidates = [
+            FakeRetrievedDocument("duplicate", "bge.md", 0.99),
+            FakeRetrievedDocument("duplicate", "qwen.md", 0.95),
+            FakeRetrievedDocument("unique", "qwen-other.md", 0.80),
+        ]
+
+        def rerank(pairs, model):
+            rerank_pairs.extend(pairs)
+            return [0.9, 0.8]
+
+        fake_service = SimpleNamespace(
+            permission_judge=lambda session, kb_sns, uid: [kb],
+            get_retrieve_param_by_kb_config_and_request=lambda knowledge_base, req: SimpleNamespace(
+                top_k=req.top_k,
+                document_score_threshold=0.0,
+                query_strategy="hybrid",
+                rerank_model="rerank",
+            ),
+            get_embedding_model_and_vector_stores=lambda session, kb_sn: {
+                "bge": SimpleNamespace(vs_indexes=["bge-index"]),
+                "qwen": SimpleNamespace(vs_indexes=["qwen-index"]),
+            },
+            get_vector_store_manager=lambda: SimpleNamespace(retrieve=lambda *args, **kwargs: candidates),
+            get_rerank_format=lambda document: document.text,
+            rerank_embedding=rerank,
+        )
+        service_pkg = ModuleType("rag_service.rag_app.service")
+        service_pkg.knowledge_base_service = fake_service
+
+        with patch.dict(
+            sys.modules,
+            {
+                "rag_service.rag_app.service": service_pkg,
+                "rag_service.rag_app.service.knowledge_base_service": fake_service,
+            },
+        ):
+            response = AgentRetrievalService(
+                search_log_writer=lambda record, session: records.append(record),
+            ).search_slices(
+                SearchSlicesRequest(query="q", kb_sn="kb-a", top_k=2, enable_rerank=True),
+                uid="uid",
+                session=object(),
+            )
+
+        self.assertEqual([text for _, text in rerank_pairs], ["duplicate", "unique"])
+        self.assertEqual([item.text for item in response.slices], ["duplicate", "unique"])
+        self.assertTrue(records[0]["extra_info"]["deduplication_applied"])
+        self.assertEqual(records[0]["extra_info"]["candidate_count_before_dedup"], 3)
+        self.assertEqual(records[0]["extra_info"]["candidate_count_after_dedup"], 2)
 
     def test_rerank_candidate_pool_keeps_high_raw_score_from_later_libing_group(self):
         from rag_service.agent_retrieval.models import SearchSlicesRequest
