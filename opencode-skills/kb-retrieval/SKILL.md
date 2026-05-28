@@ -38,6 +38,10 @@ Edit `config.json` in this skill folder:
   "base_url": "http://localhost:8001",
   "uid": "your-employee-id",
   "kb_sn_list": ["your-kb-sn"],
+  "headers": {
+    "X-HW-ID": "your-hw-id",
+    "X-HW-APPKEY": "your-hw-appkey"
+  },
   "timeout_seconds": 30
 }
 ```
@@ -49,6 +53,8 @@ export KB_RETRIEVAL_BASE_URL="http://localhost:8001"
 export KB_RETRIEVAL_UID="your-employee-id"
 export KB_SN_LIST="your-kb-sn"
 ```
+
+Fill `X-HW-ID` and `X-HW-APPKEY` in `headers`; the client sends them as HTTP headers on every request.
 
 ## Workflow
 
