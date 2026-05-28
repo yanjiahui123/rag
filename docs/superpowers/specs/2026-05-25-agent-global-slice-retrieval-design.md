@@ -35,16 +35,16 @@ For every `search_slices` request:
 
 1. Obtain or create a `request_id`, identify the caller, and apply the existing read-permission validation to all requested KBs.
 2. Set `final_top_k = clamp(request.top_k, 1, 50)`.
-3. Set `candidate_top_k = 100` when `enable_rerank` is true; otherwise use `final_top_k`.
+3. Set `candidate_top_k = final_top_k` for either backend. Libing retains its existing Elasticsearch candidate amplification; the agent endpoint does not inflate the requested IPD size.
 4. Dispatch only to the selected `retrieval_backend`.
-5. Remove exact duplicate slice texts before final selection for IPD and multi-KB Libing retrieval; preserve legacy single-KB Libing selection behavior.
+5. Remove exact duplicate slice texts before final selection for IPD, multi-KB Libing retrieval, and reranked single-KB Libing retrieval where multiple embedding models can return the same slice.
 6. If reranking is enabled, rerank the candidate list once and return at most `final_top_k`; otherwise sort by backend score descending and return at most `final_top_k`.
 7. Convert candidates through the existing agent slice projection so artifact handles are returned where metadata supports them.
 8. Persist a retrieval log record and return `request_id` with the slices.
 
 ## Libing RAG Backend
 
-For a single authorized KB, continue using its local vector-store configuration and indexes, with `candidate_top_k` passed as the requested retrieval size. This compatibility path does not introduce the new cross-KB text deduplication step.
+For a single authorized KB, continue using its local vector-store configuration and indexes, with `final_top_k` passed as the manager retrieval size. Elasticsearch retains its existing internal candidate amplification. When reranking is enabled, exact duplicate texts returned across embedding models are removed before reranking.
 
 For multiple authorized KBs:
 
@@ -70,7 +70,8 @@ For `retrieval_backend="ipd"`:
 `enable_rerank` is the only switch that controls reranking for `search_slices`.
 
 - When false, neither backend is reranked; raw backend scores determine output order.
-- When true, either backend retrieves up to 100 candidates, applies the existing rerank service once, and returns the highest ranked `final_top_k` candidates.
+- When true for Libing, the endpoint passes `final_top_k` to the existing retrieval manager, consumes its Elasticsearch-expanded candidates, removes duplicate texts, applies rerank once, and returns the highest ranked `final_top_k` candidates.
+- When true for IPD, the endpoint requests `final_top_k` candidates, applies rerank once, and returns at most `final_top_k` candidates.
 - The endpoint reuses established retrieval configuration selection rather than exposing a model parameter: a single KB uses its KB configuration, and multiple KBs use the shared multi-KB configuration.
 - If rerank invocation fails and the existing fallback returns backend candidates, the response remains usable and the diagnostic log records rerank degradation.
 
@@ -103,11 +104,12 @@ Diagnostics include at least:
   "enable_rerank": true,
   "requested_top_k": 20,
   "final_top_k": 20,
-  "candidate_top_k": 100,
+  "candidate_top_k": 20,
   "returned_slice_count": 20,
   "kb_sn_list": ["kb-a", "kb-b"],
   "candidate_count_before_dedup": 130,
   "candidate_count_after_dedup": 100,
+  "libing_manager_top_k": 20,
   "rerank_requested": true,
   "rerank_degraded": false,
   "ipd_mapped_kb_sn_list": [],
@@ -115,7 +117,7 @@ Diagnostics include at least:
 }
 ```
 
-For Libing multi-KB retrieval, diagnostics additionally record the number of analyzer groups queried. This feature does not require new `RequestDocumentHit` rows.
+For Libing retrieval, diagnostics additionally record the manager `top_k` and embedding/analyzer groups queried. This feature does not require new `RequestDocumentHit` rows.
 
 ## Error Handling
 
@@ -133,7 +135,7 @@ Focused tests must prove:
 3. Duplicate slices across Libing groups are removed before selecting final results.
 4. Selecting IPD avoids Elasticsearch retrieval, passes only mapped IDs, skips/logs unmapped KBs, and returns empty output when none map.
 5. With reranking disabled, candidate retrieval uses bounded `final_top_k`.
-6. With reranking enabled, either backend retrieves 100 candidates and reranks once before returning at most 50 slices.
+6. With reranking enabled, either backend receives bounded `final_top_k`; Libing reranks its backend-expanded candidates and IPD reranks the candidates it returns, with both producing at most 50 slices.
 7. Rerank fallback remains usable and is observable in diagnostics.
 8. Structured metadata creates agent handles, while missing IPD metadata produces text-only slices.
 9. `RequestResponseLog.retrieve_result` records final slices and `extra_info` records backend, rerank, candidate-size, and IPD mapping diagnostics.

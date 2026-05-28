@@ -44,7 +44,13 @@ def main(argv=None):
     args = parser.parse_args(argv)
     config = load_config(args.config)
     payload = build_payload(args, config)
-    result = post_json(config["base_url"], endpoint(args.command), payload, config.get("timeout_seconds", 30))
+    result = post_json(
+        config["base_url"],
+        endpoint(args.command),
+        payload,
+        config.get("timeout_seconds", 30),
+        config.get("headers", {}),
+    )
     print_json(result, pretty=args.pretty, utf8_output=args.utf8_output)
 
 
@@ -69,6 +75,7 @@ def load_config(path):
     if not config.get("base_url"):
         raise SystemExit("Missing KB_RETRIEVAL_BASE_URL or config base_url.")
     config.setdefault("kb_sn_list", [])
+    config.setdefault("headers", {})
     return config
 
 
@@ -107,11 +114,16 @@ def endpoint(command):
     }[command]
 
 
-def post_json(base_url, path, payload, timeout):
+def post_json(base_url, path, payload, timeout, headers=None):
     url = base_url.rstrip("/") + path
     body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     request = urllib.request.Request(url, data=body, method="POST")
     request.add_header("Content-Type", "application/json")
+    headers = headers or {}
+    for header_name in ("X-HW-ID", "X-HW-APPKEY"):
+        header_value = headers.get(header_name)
+        if header_value:
+            request.add_header(header_name, str(header_value))
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
             return json.loads(response.read().decode("utf-8"))

@@ -129,7 +129,7 @@ Response shape:
   "kb_sn_list": ["kb-1"],
   "slices": [
     {
-      "slice_id": "opaque-slice-id",
+      "slice_id": "stable-slice-id",
       "rank": 1,
       "text": "retrieved slice text",
       "score": 0.82,
@@ -156,16 +156,16 @@ Response shape:
         "can_get_original_text": true
       },
       "handles": {
-        "section_handle": "opaque-section-handle",
+        "section_handle": "doc-1/structured_markdown/sections/section_001.md",
         "table_handle": null,
-        "document_handle": "opaque-document-handle"
+        "document_handle": "doc-1/structured_markdown/manifest.json"
       }
     }
   ]
 }
 ```
 
-Use opaque handles for external consumers. The agent API should avoid leaking raw object storage keys by default.
+Use short OBS artifact keys for external consumers because LLMs need to round-trip handles reliably.
 
 ## Exploration Endpoints
 
@@ -178,7 +178,7 @@ Input:
 ```json
 {
   "doc_id": "doc-1",
-  "document_handle": "opaque-document-handle"
+  "document_handle": "doc-1/structured_markdown/manifest.json"
 }
 ```
 
@@ -194,7 +194,7 @@ Output:
       "title": "Risk",
       "headers": ["Report", "Risk"],
       "block_count": 4,
-      "section_handle": "opaque-section-handle"
+      "section_handle": "doc-1/structured_markdown/sections/section_001.md"
     }
   ],
   "tables": [
@@ -202,7 +202,7 @@ Output:
       "table_id": "table_001",
       "title": "Sales detail",
       "row_count": 120,
-      "table_handle": "opaque-table-handle"
+      "table_handle": "doc-1/structured_excel/tables/table_001.llm.md"
     }
   ]
 }
@@ -216,7 +216,7 @@ Input:
 
 ```json
 {
-  "section_handle": "opaque-section-handle",
+  "section_handle": "doc-1/structured_markdown/sections/section_001.md",
   "max_chars": 12000
 }
 ```
@@ -241,7 +241,7 @@ Input:
 
 ```json
 {
-  "table_handle": "opaque-table-handle",
+  "table_handle": "doc-1/structured_excel/tables/table_001.llm.md",
   "mode": "llm_text"
 }
 ```
@@ -275,7 +275,7 @@ Input:
 
 ```json
 {
-  "document_handle": "opaque-document-handle",
+  "document_handle": "doc-1/structured_markdown/manifest.json",
   "center_block_id": "block_001",
   "before": 2,
   "after": 2,
@@ -348,27 +348,23 @@ The `agent_retrieval` service should:
 - Authenticate the user or token.
 - Validate access to all requested `kb_sn` values.
 - Enforce top-k and content-size limits.
-- Convert raw metadata and artifact refs into opaque handles.
-- Resolve opaque handles back to authorized artifacts or document locations.
+- Convert raw metadata and artifact refs into short OBS-key handles.
+- Resolve OBS-key handles back to artifacts or document locations.
 - Reuse existing artifact readers for sections, tables, and document markdown.
 - Log request id, user id, endpoint, kb count, result count, and latency.
 - Avoid LLM calls in the default path.
 
 ## Handle Design
 
-Opaque handles should encode or reference:
+Handles should be OBS artifact keys:
 
 ```text
-uid or token subject
-kb_sn
-doc_id
-artifact type
-artifact key or logical location
-expiry timestamp
-signature
+document: doc-id/structured_*/manifest.json
+section: doc-id/structured_*/sections/section_001.md
+table: doc-id/structured_*/tables/table_001.llm.md
 ```
 
-The first version may use signed, URL-safe serialized payloads if there is already an internal signing utility. If not, introduce a small signer helper with a server secret. Handles should expire to limit leakage risk.
+The first version uses OBS keys directly because signed serialized payloads are long and fragile for model round-trips.
 
 ## Error Handling
 

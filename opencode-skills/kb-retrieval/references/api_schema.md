@@ -2,6 +2,8 @@
 
 Base path: `/agent/retrieval`
 
+Configure `X-HW-ID` and `X-HW-APPKEY` in `config.json`; the client sends them as HTTP headers for every API call.
+
 ## `POST /search_slices`
 
 Body:

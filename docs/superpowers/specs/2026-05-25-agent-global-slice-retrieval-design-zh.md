@@ -35,16 +35,16 @@ request_id: str
 
 1. 获取或生成 `request_id`，识别用户，并对所有请求的 KB 执行现有读权限校验。
 2. 计算 `final_top_k = clamp(request.top_k, 1, 50)`。
-3. 若 `enable_rerank=true`，令 `candidate_top_k = 100`；否则令其等于 `final_top_k`。
+3. 对两种后端均令 `candidate_top_k = final_top_k`。Libing 复用 Elasticsearch 现有的候选放大行为；agent 端点不再放大 IPD 请求规模。
 4. 仅分发到本次请求选择的 `retrieval_backend`。
-5. IPD 和多 KB Libing 检索在最终选择前按切片文本精确去重；单 KB Libing 保留原有选取行为。
+5. IPD、多 KB Libing，以及启用 rerank 的单 KB Libing 在最终选择前按切片文本精确去重，避免不同 embedding model 返回相同切片并重复占位。
 6. 若启用 rerank，仅执行一次 rerank，再截取最多 `final_top_k`；否则按后端原始得分降序选择最多 `final_top_k`。
 7. 使用现有 agent slice 映射生成可用的 artifact handles。
 8. 记录检索日志，并将 `request_id` 与 slices 一并返回。
 
 ## Libing RAG 后端
 
-当只有一个已授权 KB 时，继续使用该 KB 的本地 vector-store 配置和 indexes，将 `candidate_top_k` 作为检索候选规模；该兼容路径不引入新的跨库文本去重步骤。
+当只有一个已授权 KB 时，继续使用该 KB 的本地 vector-store 配置和 indexes，将 `final_top_k` 作为 manager 检索规模；Elasticsearch 保持其现有内部候选放大行为。启用 rerank 时，对不同 embedding model 返回的重复文本先去重再重排。
 
 当存在多个已授权 KB 时：
 
@@ -70,7 +70,8 @@ request_id: str
 `enable_rerank` 是 `search_slices` 是否重排的唯一开关。
 
 - 为 `false` 时，两种后端都不 rerank，按后端原始得分产生结果。
-- 为 `true` 时，两种后端都先检索最多 100 个候选，调用现有 rerank 服务一次，再返回 `final_top_k` 条最高排名结果。
+- 对 Libing 为 `true` 时，端点将 `final_top_k` 传给现有检索 manager，消费 Elasticsearch 已放大的候选，按文本去重后调用现有 rerank 服务一次，再返回 `final_top_k` 条最高排名结果。
+- 对 IPD 为 `true` 时，端点请求 `final_top_k` 个候选，调用 rerank 服务一次，再返回最多 `final_top_k` 条最高排名结果。
 - 本端点复用正常检索的配置选择，不额外暴露 `rerank_model` 接口参数：单 KB 使用该 KB 配置，多 KB 使用共享多 KB 配置。
 - 若 rerank 调用失败而现有降级行为返回后端候选，响应仍可使用，同时诊断日志必须记录发生了降级。
 
@@ -103,11 +104,12 @@ request_id: str
   "enable_rerank": true,
   "requested_top_k": 20,
   "final_top_k": 20,
-  "candidate_top_k": 100,
+  "candidate_top_k": 20,
   "returned_slice_count": 20,
   "kb_sn_list": ["kb-a", "kb-b"],
   "candidate_count_before_dedup": 130,
   "candidate_count_after_dedup": 100,
+  "libing_manager_top_k": 20,
   "rerank_requested": true,
   "rerank_degraded": false,
   "ipd_mapped_kb_sn_list": [],
@@ -115,7 +117,7 @@ request_id: str
 }
 ```
 
-Libing 多 KB 检索还要记录查询的 analyzer 分组数量。本次不要求新增 `RequestDocumentHit` 记录。
+Libing 检索还要记录 manager 使用的 `top_k` 以及查询的 embedding/analyzer 分组数量。本次不要求新增 `RequestDocumentHit` 记录。
 
 ## 错误处理
 
@@ -133,7 +135,7 @@ Libing 多 KB 检索还要记录查询的 analyzer 分组数量。本次不要�
 3. Libing 不同分组返回的重复切片在最终选取前去重。
 4. 选择 IPD 时不调用 Elasticsearch，仅传递有映射的 ID，跳过并记录未映射 KB；全无映射时返回空结果。
 5. 未启用 rerank 时，候选规模使用边界处理后的 `final_top_k`。
-6. 启用 rerank 时，两种后端都检索固定 100 个候选，且只 rerank 一次，最终最多返回 50 条。
+6. 启用 rerank 时，两种后端都接收边界处理后的 `final_top_k`；Libing 重排其后端已放大的候选，IPD 重排其实际返回候选，两者最终最多返回 50 条。
 7. rerank 失败后的降级结果可用并在诊断信息中可观察。
 8. 包含结构化 metadata 的候选可生成 handles；缺少 metadata 的 IPD 切片只返回文本。
 9. `RequestResponseLog.retrieve_result` 记录最终 slices，`extra_info` 记录后端、rerank、候选规模和 IPD 映射诊断。

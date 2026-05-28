@@ -4,5 +4,9 @@
   "kb_sn_list": [
     "your-kb-sn"
   ],
+  "headers": {
+    "X-HW-ID": "",
+    "X-HW-APPKEY": ""
+  },
   "timeout_seconds": 30
 }
