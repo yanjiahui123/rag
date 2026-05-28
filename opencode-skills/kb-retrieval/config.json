@@ -8,5 +8,5 @@
     "X-HW-ID": "",
     "X-HW-APPKEY": ""
   },
-  "timeout_seconds": 30
+  "timeout_seconds": 300
 }

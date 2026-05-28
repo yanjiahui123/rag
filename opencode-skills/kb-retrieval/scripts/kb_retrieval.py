@@ -48,7 +48,7 @@ def main(argv=None):
         config["base_url"],
         endpoint(args.command),
         payload,
-        config.get("timeout_seconds", 30),
+        config.get("timeout_seconds", 300),
         config.get("headers", {}),
     )
     print_json(result, pretty=args.pretty, utf8_output=args.utf8_output)
