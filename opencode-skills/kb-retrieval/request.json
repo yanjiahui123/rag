@@ -3,5 +3,7 @@
   "pretty": true,
   "utf8_output": true,
   "query": "",
-  "top_k": 20
+  "top_k": 20,
+  "retrieval_backend": "libing",
+  "enable_rerank": true
 }

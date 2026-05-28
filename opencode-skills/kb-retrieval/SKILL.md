@@ -68,7 +68,7 @@ export KB_SN_LIST="your-kb-sn"
   "query": "USER_QUERY_HERE",
   "top_k": 20,
   "retrieval_backend": "libing",
-  "enable_rerank": false
+  "enable_rerank": true
 }
 ```
 
@@ -145,7 +145,7 @@ python .opencode/skills/kb-retrieval/scripts/kb_retrieval_request.py
 python .opencode/skills/kb-retrieval/scripts/kb_retrieval_request.py
 ```
 
-6. 仅当所选知识库已经映射到 IPD RAG 时，才使用 `"retrieval_backend": "ipd"`。如果需要更好的排序质量，可以设置 `"enable_rerank": true`，在返回请求的 `top_k` 前对检索候选进行 rerank。
+6. 默认开启 `"enable_rerank": true`，以便在返回请求的 `top_k` 前对检索候选进行 rerank。需要更快但排序质量较弱的结果时，可改为 `"enable_rerank": false`。仅当所选知识库已经映射到 IPD RAG 时，才使用 `"retrieval_backend": "ipd"`。
 
 7. 如果结果较弱，在本地改写问题后再次搜索。
 

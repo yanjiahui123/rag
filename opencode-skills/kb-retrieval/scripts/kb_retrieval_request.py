@@ -41,6 +41,9 @@ def build_argv(request):
     if command == "search":
         argv.extend(["--query", require(request, "query")])
         argv.extend(["--top-k", str(request.get("top_k", request.get("top-k", 20)))])
+        argv.extend(["--retrieval-backend", request.get("retrieval_backend", "libing")])
+        if request.get("enable_rerank", True):
+            argv.append("--enable-rerank")
     elif command == "outline":
         argv.extend(["--document-handle", require(request, "document_handle")])
     elif command == "section":

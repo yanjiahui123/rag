@@ -21,6 +21,8 @@ def main(argv=None):
     search = subparsers.add_parser("search")
     search.add_argument("--query", required=True)
     search.add_argument("--top-k", type=int, default=20)
+    search.add_argument("--retrieval-backend", choices=["libing", "ipd"], default="libing")
+    search.add_argument("--enable-rerank", action="store_true")
 
     outline = subparsers.add_parser("outline")
     outline.add_argument("--document-handle", required=True)
@@ -85,7 +87,14 @@ def default_config_path():
 
 def build_payload(args, config):
     if args.command == "search":
-        return {"uid": config.get("uid"), "query": args.query, "kb_sn_list": config.get("kb_sn_list", []), "top_k": args.top_k}
+        return {
+            "uid": config.get("uid"),
+            "query": args.query,
+            "kb_sn_list": config.get("kb_sn_list", []),
+            "top_k": args.top_k,
+            "retrieval_backend": args.retrieval_backend,
+            "enable_rerank": args.enable_rerank,
+        }
     if args.command == "outline":
         return {"uid": config.get("uid"), "document_handle": args.document_handle}
     if args.command == "section":
